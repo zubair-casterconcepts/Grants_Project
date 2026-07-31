@@ -1,0 +1,15 @@
+{% load static %}
+<div id="page-loader" class="page-loader" hidden aria-hidden="true" role="status" aria-live="polite">
+  <div class="page-loader__veil"></div>
+  <div class="page-loader__panel">
+    <div class="page-loader__orbit" aria-hidden="true">
+      <span class="page-loader__ring"></span>
+      <span class="page-loader__ring page-loader__ring--delay"></span>
+      <span class="page-loader__core"></span>
+    </div>
+    <p class="page-loader__brand">Grants</p>
+    <p class="page-loader__message" data-loader-message>Loading…</p>
+  </div>
+</div>
+<link rel="stylesheet" href="{% static 'css/loader.css' %}">
+<script src="{% static 'js/page-loader.js' %}" defer></script>

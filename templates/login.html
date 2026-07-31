@@ -1,0 +1,51 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Grants — Sign in</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=Manrope:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="{% static 'css/auth.css' %}">
+  <link rel="stylesheet" href="{% static 'css/dashboard.css' %}">
+</head>
+<body class="dashboard-page auth-page">
+  <main class="auth-shell">
+    <header class="auth-brand">
+      <p class="brand-mark">Grants</p>
+      <h1 class="brand-line">Sign in to continue</h1>
+      <p class="brand-sub">Access your workspace with your Grants account.</p>
+    </header>
+
+    <form class="auth-form" method="post" action="{% url 'auth:login' %}" novalidate data-loader-message="Signing you in…">
+      {% csrf_token %}
+      {% if next %}<input type="hidden" name="next" value="{{ next }}">{% endif %}
+
+      {% if messages %}
+        <ul class="dash-messages">
+          {% for message in messages %}
+            <li class="{{ message.tags }}">{{ message }}</li>
+          {% endfor %}
+        </ul>
+      {% endif %}
+
+      <label class="field">
+        <span>Username</span>
+        <input type="text" name="username" autocomplete="username" required autofocus>
+      </label>
+
+      <label class="field">
+        <span>Password</span>
+        <input type="password" name="password" autocomplete="current-password" required>
+      </label>
+
+      <button type="submit" class="btn-primary">Sign in</button>
+    </form>
+  </main>
+
+  <script src="{% static 'js/auth.js' %}" defer></script>
+  {% include "partials/page_loader.html" %}
+</body>
+</html>

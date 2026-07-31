@@ -1,0 +1,144 @@
+from django.contrib.auth.models import AbstractUser
+from django.db import models
+
+
+class GrantUser(AbstractUser):
+    """
+    Custom user stored in Supabase Postgres as grant_user.
+    Login uses username + password via Django auth sessions.
+    """
+
+    class Meta:
+        db_table = "grant_user"
+        verbose_name = "Grant user"
+        verbose_name_plural = "Grant users"
+
+    def __str__(self) -> str:
+        return self.get_username()
+
+
+class Profile(models.Model):
+    """User intake + org details stored against grant_user."""
+
+    class PriorityArea(models.TextChoices):
+        ARTS = "Arts", "Arts"
+        COMMUNITY_DEVELOPMENT = "Community Development", "Community Development"
+        CULTURE = "Culture", "Culture"
+        DOWNTOWN_DEVELOPMENT = "Downtown Development", "Downtown Development"
+        ECONOMIC_DEVELOPMENT = "Economic Development", "Economic Development"
+        EDUCATION = "Education", "Education"
+        FOOD_ACCESS = "Food Access", "Food Access"
+        HEALTH = "Health", "Health"
+        HOUSING = "Housing", "Housing"
+        HUMAN_SERVICES = "Human Services", "Human Services"
+        LITERACY = "Literacy", "Literacy"
+        PUBLIC_SAFETY = "Public Safety", "Public Safety"
+        RECREATION = "Recreation", "Recreation"
+        WORKFORCE_DEVELOPMENT = "Workforce Development", "Workforce Development"
+        YOUTH_DEVELOPMENT = "Youth Development", "Youth Development"
+
+    class OrgType(models.TextChoices):
+        C501C3 = "501c3", "501(c)(3)"
+        GOVERNMENT = "government", "Government"
+        SCHOOL = "school", "School"
+        OTHER = "other", "Other"
+
+    user = models.OneToOneField(
+        GrantUser,
+        on_delete=models.CASCADE,
+        related_name="profile",
+    )
+    organization = models.CharField(max_length=255, blank=True)
+    role_title = models.CharField(max_length=120, blank=True)
+
+    # Intake fields (collected on first login / editable in Settings)
+    title = models.CharField(max_length=255, blank=True, help_text="What you seek funding for")
+    description = models.TextField(blank=True, help_text="What the work does")
+    priority_area = models.CharField(
+        max_length=64,
+        choices=PriorityArea.choices,
+        blank=True,
+    )
+    ntee_code = models.CharField(max_length=32, blank=True)
+    location_city = models.CharField(max_length=120, blank=True)
+    location_state = models.CharField(max_length=2, blank=True)
+    org_type = models.CharField(max_length=32, choices=OrgType.choices, blank=True)
+    budget_requested = models.DecimalField(
+        max_digits=14,
+        decimal_places=2,
+        null=True,
+        blank=True,
+    )
+    eligibility_notes = models.TextField(blank=True)
+    onboarding_completed = models.BooleanField(default=False)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "grant_profile"
+        ordering = ["-created_at"]
+        verbose_name = "Grant profile"
+        verbose_name_plural = "Grant profiles"
+
+    def __str__(self) -> str:
+        return f"Profile<{self.user.get_username()}>"
+
+    @property
+    def needs_onboarding(self) -> bool:
+        return not self.onboarding_completed
+
+
+class SavedGrant(models.Model):
+    """User-saved grant opportunity stored in Supabase."""
+
+    class Source(models.TextChoices):
+        GRANTS_GOV = "grants_gov", "Grants.gov"
+        USASPENDING = "usaspending", "USASpending"
+        GRANTED_AI = "granted_ai", "GrantedAI"
+
+    user = models.ForeignKey(
+        GrantUser,
+        on_delete=models.CASCADE,
+        related_name="saved_grants",
+    )
+    source = models.CharField(max_length=32, choices=Source.choices)
+    external_id = models.CharField(max_length=255, blank=True)
+    title = models.CharField(max_length=500)
+    agency = models.CharField(max_length=255, blank=True)
+    agency_code = models.CharField(max_length=64, blank=True)
+    agency_address = models.CharField(max_length=500, blank=True)
+    top_agency = models.CharField(max_length=255, blank=True)
+    deadline = models.CharField(max_length=64, blank=True)
+    url = models.CharField(max_length=1000, blank=True)
+    opp_status = models.CharField(max_length=120, blank=True)
+    number = models.CharField(max_length=120, blank=True)
+    amount = models.CharField(max_length=64, blank=True)
+    score = models.FloatField(null=True, blank=True)
+    reason = models.TextField(blank=True)
+    description = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "grant_saved"
+        ordering = ["-created_at"]
+        verbose_name = "Saved grant"
+        verbose_name_plural = "Saved grants"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["user", "source", "external_id"],
+                name="uniq_user_source_external_grant",
+            )
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.title[:60]} ({self.source})"
+
+    @property
+    def chance_percent(self) -> int:
+        if self.score is None:
+            return 0
+        try:
+            return max(0, min(100, int(round(float(self.score) * 100))))
+        except (TypeError, ValueError):
+            return 0
