@@ -16,4 +16,5 @@ def attempt_login(request, username: str, password: str) -> AbstractBaseUser | N
 
 
 def attempt_logout(request) -> None:
+    """Clear auth state. Django's logout() already flushes the session."""
     logout(request)

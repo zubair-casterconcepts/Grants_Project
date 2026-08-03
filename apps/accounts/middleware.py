@@ -2,8 +2,9 @@ from django.shortcuts import redirect
 
 from .services import get_or_create_profile
 
-# Paths allowed before onboarding is finished.
+# Paths allowed before onboarding is finished (chat collects intake).
 _ALLOWED_PREFIXES = (
+    "/home",
     "/accounts/onboarding",
     "/logout",
     "/admin",
@@ -12,7 +13,7 @@ _ALLOWED_PREFIXES = (
 
 
 class OnboardingMiddleware:
-    """Send first-time users to complete their profile before the dashboard."""
+    """Send first-time users to the chat intake before other app pages."""
 
     def __init__(self, get_response):
         self.get_response = get_response
@@ -26,6 +27,6 @@ class OnboardingMiddleware:
                 if path in ("/", "/login/", "/login"):
                     return self.get_response(request)
                 profile = get_or_create_profile(user)
-                if profile.needs_onboarding and not path.startswith("/accounts/onboarding"):
-                    return redirect("accounts:onboarding")
+                if profile.needs_onboarding:
+                    return redirect("auth:home")
         return self.get_response(request)

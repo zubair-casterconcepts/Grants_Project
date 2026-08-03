@@ -13,9 +13,9 @@
   <div class="profile-menu-dropdown" role="menu" hidden>
     <a
       class="profile-menu-link"
-      href="{% url 'accounts:settings' %}"
+      href="{% url 'accounts:profile_settings' %}"
       role="menuitem"
-      data-loader-message="Opening settings…"
+      data-loader-message="Opening profile settings…"
     >
       <span class="profile-menu-icon" aria-hidden="true">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
@@ -26,23 +26,20 @@
       <span>Profile settings</span>
     </a>
 
-    <form
-      method="post"
-      action="{% url 'auth:logout' %}"
-      class="profile-menu-logout-form"
+    <a
+      class="profile-menu-link profile-menu-logout"
+      href="{% url 'auth:logout' %}"
+      role="menuitem"
       data-loader-message="Signing you out…"
     >
-      {% csrf_token %}
-      <button type="submit" class="profile-menu-link profile-menu-logout" role="menuitem">
-        <span class="profile-menu-icon" aria-hidden="true">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
-            <path d="M10 4.5H7.5A2.5 2.5 0 0 0 5 7v10a2.5 2.5 0 0 0 2.5 2.5H10" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
-            <path d="M13.5 12H20" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
-            <path d="M17.5 8.5 21 12l-3.5 3.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
-          </svg>
-        </span>
-        <span>Logout</span>
-      </button>
-    </form>
+      <span class="profile-menu-icon" aria-hidden="true">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
+          <path d="M10 4.5H7.5A2.5 2.5 0 0 0 5 7v10a2.5 2.5 0 0 0 2.5 2.5H10" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+          <path d="M13.5 12H20" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+          <path d="M17.5 8.5 21 12l-3.5 3.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </span>
+      <span>Logout</span>
+    </a>
   </div>
 </div>

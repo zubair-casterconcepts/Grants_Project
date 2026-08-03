@@ -1,0 +1,79 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Grants — Profile settings</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=Manrope:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="{% static 'css/auth.css' %}">
+  <link rel="stylesheet" href="{% static 'css/dashboard.css' %}">
+</head>
+<body class="dashboard-page home-page">
+  <main class="home-shell form-shell">
+    <header class="dash-topbar">
+      <a class="dash-brand" href="{% url 'auth:home' %}" data-loader-message="Opening chat…">Grants</a>
+      <div class="dash-top-actions">
+        <a class="dash-nav-btn" href="{% url 'accounts:saved_grants' %}" data-loader-message="Opening saved grants…">Saved</a>
+        <a class="dash-nav-btn" href="{% url 'accounts:settings' %}" data-loader-message="Opening settings…">Settings</a>
+        <a class="dash-nav-btn" href="{% url 'auth:home' %}" data-loader-message="Opening chat…">Chat</a>
+        {% include "partials/profile_menu.html" %}
+      </div>
+    </header>
+
+    {% if messages %}
+      <ul class="dash-messages">
+        {% for message in messages %}
+          <li class="{{ message.tags }}">{{ message }}</li>
+        {% endfor %}
+      </ul>
+    {% endif %}
+
+    <section class="settings-password" aria-labelledby="password-heading">
+      <div class="settings-password-head">
+        <h1 id="password-heading">Change password</h1>
+        <p>Update the password you use to sign in to Grants.</p>
+      </div>
+
+      <form class="auth-form project-form" id="password-change-form" autocomplete="off" novalidate>
+        <label class="field">
+          <span>Current password</span>
+          <input
+            type="password"
+            name="old_password"
+            autocomplete="current-password"
+            placeholder="Enter your current password"
+          >
+        </label>
+        <label class="field">
+          <span>New password</span>
+          <input
+            type="password"
+            name="new_password"
+            autocomplete="new-password"
+            placeholder="Enter a new password"
+          >
+        </label>
+        <label class="field">
+          <span>Confirm new password</span>
+          <input
+            type="password"
+            name="confirm_password"
+            autocomplete="new-password"
+            placeholder="Re-enter the new password"
+          >
+        </label>
+        <button type="button" class="btn-primary" id="password-change-btn" disabled>
+          Update password
+        </button>
+        <p class="settings-password-note">Password updates will be wired up next — this screen is UI only for now.</p>
+      </form>
+    </section>
+  </main>
+
+  {% include "partials/page_loader.html" %}
+  <script src="{% static 'js/profile-menu.js' %}" defer></script>
+</body>
+</html>

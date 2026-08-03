@@ -25,7 +25,8 @@
 
   menus.forEach((menu) => {
     const trigger = menu.querySelector(".profile-menu-trigger");
-    if (!trigger) return;
+    const dropdown = menu.querySelector(".profile-menu-dropdown");
+    if (!trigger || !dropdown) return;
 
     trigger.addEventListener("click", (event) => {
       event.preventDefault();
@@ -36,10 +37,16 @@
         openMenu(menu);
       }
     });
+
+    // Keep clicks inside the dropdown from being treated as "outside".
+    dropdown.addEventListener("click", (event) => {
+      event.stopPropagation();
+    });
   });
 
   document.addEventListener("click", (event) => {
     const target = event.target;
+    if (!(target instanceof Node)) return;
     menus.forEach((menu) => {
       if (!menu.contains(target)) {
         closeMenu(menu);

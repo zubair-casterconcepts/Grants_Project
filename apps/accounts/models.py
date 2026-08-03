@@ -142,3 +142,60 @@ class SavedGrant(models.Model):
             return max(0, min(100, int(round(float(self.score) * 100))))
         except (TypeError, ValueError):
             return 0
+
+
+class Conversation(models.Model):
+    """A ChatGPT-style chat thread owned by a user, optionally linked to a Project."""
+
+    user = models.ForeignKey(
+        GrantUser,
+        on_delete=models.CASCADE,
+        related_name="conversations",
+    )
+    project = models.ForeignKey(
+        "projects.Project",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="conversations",
+    )
+    title = models.CharField(max_length=255, default="New chat")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "grant_conversation"
+        ordering = ["-updated_at", "-created_at"]
+        verbose_name = "Conversation"
+        verbose_name_plural = "Conversations"
+
+    def __str__(self) -> str:
+        return f"{self.title} ({self.user.get_username()})"
+
+
+class Message(models.Model):
+    """One message in a conversation (user or assistant)."""
+
+    class Role(models.TextChoices):
+        USER = "user", "User"
+        ASSISTANT = "assistant", "Assistant"
+
+    conversation = models.ForeignKey(
+        Conversation,
+        on_delete=models.CASCADE,
+        related_name="messages",
+    )
+    role = models.CharField(max_length=16, choices=Role.choices)
+    content = models.TextField()
+    # Optional structured payload (e.g. match cards) for history restore.
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "grant_message"
+        ordering = ["created_at", "id"]
+        verbose_name = "Message"
+        verbose_name_plural = "Messages"
+
+    def __str__(self) -> str:
+        return f"{self.role}: {self.content[:48]}"

@@ -14,17 +14,17 @@
 <body class="dashboard-page home-page">
   <main class="home-shell form-shell">
     <header class="dash-topbar">
-      <a class="dash-brand" href="{% url 'auth:home' %}" data-loader-message="Opening dashboard…">Grants</a>
+      <a class="dash-brand" href="{% url 'auth:home' %}" data-loader-message="Opening chat…">Grants</a>
       <div class="dash-top-actions">
         <a class="dash-nav-btn" href="{% url 'accounts:saved_grants' %}" data-loader-message="Opening saved grants…">Saved</a>
-        <a class="dash-nav-btn" href="{% url 'auth:home' %}" data-loader-message="Opening dashboard…">Dashboard</a>
+        <a class="dash-nav-btn" href="{% url 'auth:home' %}" data-loader-message="Opening chat…">Chat</a>
         {% include "partials/profile_menu.html" %}
       </div>
     </header>
 
     <section class="dash-hero">
       <h1>Settings</h1>
-      <p class="dash-subtitle">Update the information stored on your account for grant matching.</p>
+      <p class="dash-subtitle">Update the organization and project details used for grant matching.</p>
     </section>
 
     {% if messages %}

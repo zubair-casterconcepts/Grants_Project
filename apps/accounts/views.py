@@ -12,8 +12,16 @@ from .services import get_or_create_profile
 @login_required
 @require_http_methods(["GET", "POST"])
 def onboarding_view(request):
+    """Legacy form route — intake now happens in the chat UI on /home/."""
+    return redirect("auth:home")
+
+
+@login_required
+@require_http_methods(["GET", "POST"])
+def settings_view(request):
+    """Project / org settings — priority area, organization, location, etc."""
     profile = get_or_create_profile(request.user)
-    if profile.onboarding_completed:
+    if profile.needs_onboarding:
         return redirect("auth:home")
 
     if request.method == "POST":
@@ -21,31 +29,6 @@ def onboarding_view(request):
         if form.is_valid():
             profile = form.save(commit=False)
             profile.ntee_code = profile.ntee_code or ""
-            profile.onboarding_completed = True
-            profile.save()
-            messages.success(request, "Your profile is ready. Welcome to Grants.")
-            return redirect("auth:home")
-    else:
-        form = ProfileIntakeForm(instance=profile)
-
-    return render(
-        request,
-        "accounts/onboarding.html",
-        {"form": form, "profile": profile},
-    )
-
-
-@login_required
-@require_http_methods(["GET", "POST"])
-def settings_view(request):
-    profile = get_or_create_profile(request.user)
-    if profile.needs_onboarding:
-        return redirect("accounts:onboarding")
-
-    if request.method == "POST":
-        form = ProfileIntakeForm(request.POST, instance=profile)
-        if form.is_valid():
-            profile = form.save(commit=False)
             profile.onboarding_completed = True
             profile.save()
             messages.success(request, "Settings updated.")
@@ -65,8 +48,26 @@ def settings_view(request):
 
 
 @login_required
+@require_http_methods(["GET"])
+def profile_settings_view(request):
+    """Profile settings — password change UI (backend wiring later)."""
+    profile = get_or_create_profile(request.user)
+    if profile.needs_onboarding:
+        return redirect("auth:home")
+
+    return render(
+        request,
+        "accounts/profile_settings.html",
+        {
+            "profile": profile,
+            "saved_count": SavedGrant.objects.filter(user=request.user).count(),
+        },
+    )
+
+
+@login_required
 def profile_view(request):
-    return redirect("accounts:settings")
+    return redirect("accounts:profile_settings")
 
 
 @login_required
@@ -74,7 +75,7 @@ def profile_view(request):
 def saved_grants_view(request):
     profile = get_or_create_profile(request.user)
     if profile.needs_onboarding:
-        return redirect("accounts:onboarding")
+        return redirect("auth:home")
 
     saved = SavedGrant.objects.filter(user=request.user)
     return render(
@@ -103,7 +104,7 @@ def save_grant_view(request):
     if profile.needs_onboarding:
         if _wants_json(request):
             return JsonResponse({"ok": False, "error": "onboarding_required"}, status=403)
-        return redirect("accounts:onboarding")
+        return redirect("auth:home")
 
     source = (request.POST.get("source") or "").strip()
     external_id = (request.POST.get("external_id") or request.POST.get("id") or "").strip()

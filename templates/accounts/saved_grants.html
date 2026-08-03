@@ -13,9 +13,9 @@
 <body class="dashboard-page">
   <main class="dashboard-shell">
     <header class="dash-topbar">
-      <a class="dash-brand" href="{% url 'auth:home' %}" data-loader-message="Opening dashboard…">Grants</a>
+      <a class="dash-brand" href="{% url 'auth:home' %}" data-loader-message="Opening chat…">Grants</a>
       <div class="dash-top-actions">
-        <a class="dash-nav-btn" href="{% url 'auth:home' %}" data-loader-message="Opening dashboard…">Dashboard</a>
+        <a class="dash-nav-btn" href="{% url 'auth:home' %}" data-loader-message="Opening chat…">Chat</a>
         <a class="dash-nav-btn" href="{% url 'accounts:settings' %}" data-loader-message="Opening settings…">Settings</a>
         {% include "partials/profile_menu.html" %}
       </div>
@@ -153,8 +153,8 @@
         </article>
       {% empty %}
         <p class="dashboard-empty">
-          No saved grants yet. Go to the
-          <a href="{% url 'auth:home' %}">dashboard</a>
+          No saved grants yet. Go to
+          <a href="{% url 'auth:home' %}">chat</a>
           and click Save on any match.
         </p>
       {% endfor %}

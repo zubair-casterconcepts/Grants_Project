@@ -1,7 +1,7 @@
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin as DjangoUserAdmin
 
-from .models import GrantUser, Profile, SavedGrant
+from .models import Conversation, GrantUser, Message, Profile, SavedGrant
 
 
 class ProfileInline(admin.StackedInline):
@@ -63,4 +63,35 @@ class SavedGrantAdmin(admin.ModelAdmin):
     list_filter = ("source", "created_at")
     search_fields = ("title", "agency", "number", "external_id", "user__username")
     autocomplete_fields = ("user",)
+
+
+class MessageInline(admin.TabularInline):
+    model = Message
+    extra = 0
+    fields = ("role", "content", "created_at")
+    readonly_fields = ("created_at",)
+    show_change_link = True
+
+
+@admin.register(Conversation)
+class ConversationAdmin(admin.ModelAdmin):
+    list_display = ("title", "user", "project", "updated_at", "created_at")
+    list_filter = ("created_at", "updated_at")
+    search_fields = ("title", "user__username", "project__title")
+    autocomplete_fields = ("user", "project")
+    readonly_fields = ("created_at", "updated_at")
+    inlines = [MessageInline]
+
+
+@admin.register(Message)
+class MessageAdmin(admin.ModelAdmin):
+    list_display = ("conversation", "role", "short_content", "created_at")
+    list_filter = ("role", "created_at")
+    search_fields = ("content", "conversation__title", "conversation__user__username")
+    autocomplete_fields = ("conversation",)
+    readonly_fields = ("created_at",)
+
+    @admin.display(description="Content")
+    def short_content(self, obj: Message) -> str:
+        return (obj.content or "")[:80]
 

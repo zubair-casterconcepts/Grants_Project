@@ -276,6 +276,8 @@ html.is-page-loading body {
 
 .home-header,
 .dash-topbar {
+  position: relative;
+  z-index: 200;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -332,6 +334,41 @@ html.is-page-loading body {
 
 .page-loader__message {
   color: var(--dash-muted) !important;
+}
+
+.settings-password {
+  margin-top: 0.35rem;
+  animation: rise 700ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.settings-password-head h1,
+.settings-password-head h2 {
+  margin: 0 0 0.35rem;
+  font-family: var(--font-display);
+  font-size: clamp(1.85rem, 4vw, 2.35rem);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: var(--dash-ink);
+}
+
+.settings-password-head p {
+  margin: 0 0 1.15rem;
+  color: var(--dash-muted);
+  font-size: 0.95rem;
+  line-height: 1.5;
+}
+
+.settings-password .btn-primary:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.settings-password-note {
+  margin: 0.65rem 0 0;
+  color: var(--dash-muted);
+  font-size: 0.82rem;
+  line-height: 1.45;
 }
 
 @keyframes rise {
