@@ -41,9 +41,9 @@
   let conversationsState = conversationsBootstrapEl
     ? JSON.parse(conversationsBootstrapEl.textContent || "{}")
     : { active_id: null, conversations: [] };
-  let conversationId =
-    Number(app.dataset.activeConversationId || conversationsState.active_id) ||
-    null;
+  let conversationId = asConversationId(
+    app.dataset.activeConversationId || conversationsState.active_id
+  );
   let conversations = Array.isArray(conversationsState.conversations)
     ? conversationsState.conversations
     : [];
@@ -51,6 +51,19 @@
   let keepBusy = false;
   let currentStep = null;
   let persistEnabled = true;
+  const LOAD_CONVERSATION_ERROR =
+    "I couldn't load that conversation. Try another one or start a new chat.";
+
+  function asConversationId(value) {
+    const id = Number(value);
+    return Number.isFinite(id) && id > 0 ? id : null;
+  }
+
+  function isSameConversation(a, b) {
+    const left = asConversationId(a);
+    const right = asConversationId(b);
+    return Boolean(left && right && left === right);
+  }
 
   const INTAKE_STEPS = [
     {
@@ -121,8 +134,66 @@
     return escapeHtml(value).replace(/\n/g, " ");
   }
 
-  function scrollToBottom() {
-    transcript.scrollTop = transcript.scrollHeight;
+  // Keep the viewport pinned to newest streamed content unless the user scrolls up.
+  const SCROLL_PIN_PX = 140;
+  let stickToBottom = true;
+  let scrollRaf = 0;
+  let ignoreScrollEvent = false;
+
+  function distanceFromBottom() {
+    const doc = document.documentElement;
+    const body = document.body;
+    const scrollTop = window.scrollY || doc.scrollTop || body.scrollTop || 0;
+    const viewport = window.innerHeight || doc.clientHeight || 0;
+    const height = Math.max(doc.scrollHeight || 0, body.scrollHeight || 0);
+    return height - (scrollTop + viewport);
+  }
+
+  function updateStickToBottom() {
+    if (ignoreScrollEvent) return;
+    stickToBottom = distanceFromBottom() <= SCROLL_PIN_PX;
+  }
+
+  window.addEventListener("scroll", updateStickToBottom, { passive: true });
+
+  function scrollToBottom(options = {}) {
+    // Full-page scroll (ChatGPT-style) — no inner transcript scrollbar.
+    // Instant + rAF-coalesced during streaming; smooth only when explicitly requested.
+    const force = options.force === true;
+    const smooth = options.smooth === true;
+    if (!force && !stickToBottom) return;
+
+    const run = () => {
+      scrollRaf = 0;
+      const top = Math.max(
+        document.documentElement.scrollHeight || 0,
+        document.body.scrollHeight || 0
+      );
+      ignoreScrollEvent = true;
+      window.scrollTo({
+        top,
+        left: 0,
+        behavior: smooth ? "smooth" : "auto",
+      });
+      stickToBottom = true;
+      // Allow the browser to apply layout before re-enabling scroll tracking.
+      requestAnimationFrame(() => {
+        ignoreScrollEvent = false;
+        updateStickToBottom();
+      });
+    };
+
+    if (smooth) {
+      if (scrollRaf) {
+        cancelAnimationFrame(scrollRaf);
+        scrollRaf = 0;
+      }
+      run();
+      return;
+    }
+
+    if (scrollRaf) cancelAnimationFrame(scrollRaf);
+    scrollRaf = requestAnimationFrame(run);
   }
 
   function autosize() {
@@ -135,33 +206,72 @@
     row.className = `chat-row is-${role}`;
     row.innerHTML = html;
     transcript.appendChild(row);
-    scrollToBottom();
+    // User messages always re-pin; assistant/stream updates follow stick-to-bottom.
+    scrollToBottom({ force: role === "user" });
     return row;
   }
 
-  function appendText(role, text, options = {}) {
+  async function appendText(role, text, options = {}) {
     const row = appendRow(
       role,
       `<div class="chat-bubble">${escapeHtml(text)}</div>`
     );
     if (options.persist !== false) {
-      persistMessage(role, text, options.metadata || {});
+      await persistMessage(role, text, options.metadata || {});
     }
     return row;
   }
 
-  function appendAssistantHtml(inner, options = {}) {
+  async function appendAssistantHtml(inner, options = {}) {
     const row = appendRow("assistant", `<div class="chat-bubble">${inner}</div>`);
     if (options.persist !== false && options.persistContent) {
-      persistMessage("assistant", options.persistContent, options.metadata || {});
+      await persistMessage("assistant", options.persistContent, options.metadata || {});
     }
     return row;
+  }
+
+  async function ensureConversation() {
+    if (conversationId) return conversationId;
+    // Always start as "New chat"; first user message gets an AI short title.
+    const response = await fetch(conversationsUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        "X-CSRFToken": csrfToken,
+        "X-Requested-With": "XMLHttpRequest",
+      },
+      credentials: "same-origin",
+      body: JSON.stringify({ title: "New chat" }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data.ok || !data.conversation) {
+      throw new Error("create_failed");
+    }
+    conversationId = asConversationId(data.conversation.id);
+    if (!conversationId) throw new Error("create_failed");
+    upsertConversationLocal(data.conversation);
+    renderConversationList();
+    setActiveTitle(data.conversation.title);
+    return conversationId;
   }
 
   async function persistMessage(role, content, metadata = {}) {
-    if (!persistEnabled || !conversationId) return null;
+    if (!persistEnabled) return null;
     const text = String(content || "").trim();
     if (!text && !(metadata && Object.keys(metadata).length)) return null;
+
+    // Create a DB thread only when the user sends the first message.
+    if (!conversationId) {
+      if (role !== "user") return null;
+      try {
+        await ensureConversation();
+      } catch (_) {
+        return null;
+      }
+    }
+    if (!conversationId) return null;
+
     try {
       const response = await fetch(
         `${conversationsUrl}${conversationId}/messages/`,
@@ -220,8 +330,11 @@
 
   function upsertConversationLocal(conversation) {
     if (!conversation || !conversation.id) return;
-    const rest = conversations.filter((row) => row.id !== conversation.id);
-    conversations = [conversation, ...rest];
+    const id = asConversationId(conversation.id);
+    if (!id) return;
+    const normalized = { ...conversation, id };
+    const rest = conversations.filter((row) => !isSameConversation(row.id, id));
+    conversations = [normalized, ...rest];
   }
 
   function setActiveTitle(title) {
@@ -241,14 +354,77 @@
     });
   }
 
-  async function deleteConversation(id) {
+  const deleteModal = document.getElementById("chat-delete-modal");
+  const deleteBackdrop = document.getElementById("chat-delete-backdrop");
+  const deleteCancelBtn = document.getElementById("chat-delete-cancel");
+  const deleteConfirmBtn = document.getElementById("chat-delete-confirm");
+  const deleteNameEl = document.getElementById("chat-delete-name");
+  let deleteResolver = null;
+  let deleteFocusReturn = null;
+
+  function closeDeleteModal(result) {
+    if (!deleteModal || deleteModal.hidden) {
+      if (deleteResolver) {
+        const resolve = deleteResolver;
+        deleteResolver = null;
+        resolve(Boolean(result));
+      }
+      return;
+    }
+    deleteModal.hidden = true;
+    document.body.classList.remove("chat-modal-open");
+    const resolve = deleteResolver;
+    deleteResolver = null;
+    if (deleteFocusReturn && typeof deleteFocusReturn.focus === "function") {
+      deleteFocusReturn.focus();
+    }
+    deleteFocusReturn = null;
+    if (resolve) resolve(Boolean(result));
+  }
+
+  function openDeleteModal(title) {
+    return new Promise((resolve) => {
+      if (!deleteModal || !deleteConfirmBtn) {
+        resolve(false);
+        return;
+      }
+      if (deleteResolver) closeDeleteModal(false);
+      deleteResolver = resolve;
+      deleteFocusReturn = document.activeElement;
+      if (deleteNameEl) {
+        deleteNameEl.textContent = title || "this chat";
+      }
+      deleteModal.hidden = false;
+      document.body.classList.add("chat-modal-open");
+      deleteConfirmBtn.focus();
+    });
+  }
+
+  if (deleteCancelBtn) {
+    deleteCancelBtn.addEventListener("click", () => closeDeleteModal(false));
+  }
+  if (deleteBackdrop) {
+    deleteBackdrop.addEventListener("click", () => closeDeleteModal(false));
+  }
+  if (deleteConfirmBtn) {
+    deleteConfirmBtn.addEventListener("click", () => closeDeleteModal(true));
+  }
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && deleteModal && !deleteModal.hidden) {
+      event.preventDefault();
+      closeDeleteModal(false);
+    }
+  });
+
+  async function deleteConversation(id, title) {
     if (!id || busy) return;
-    const confirmed = window.confirm("Delete this chat? This cannot be undone.");
+    closeAllConversationMenus();
+    const confirmed = await openDeleteModal(title || "this chat");
     if (!confirmed) return;
 
     busy = true;
     setComposerEnabled(false);
-    closeAllConversationMenus();
+    if (deleteConfirmBtn) deleteConfirmBtn.disabled = true;
     try {
       const response = await fetch(`${conversationsUrl}${id}/`, {
         method: "DELETE",
@@ -263,16 +439,16 @@
       if (!response.ok || !data.ok) throw new Error("delete_failed");
 
       conversations = Array.isArray(data.conversations) ? data.conversations : [];
-      const wasActive = id === conversationId;
+      const wasActive = isSameConversation(id, conversationId);
       renderConversationList();
 
       if (!wasActive) return;
 
       if (data.next_id) {
-        await loadConversation(data.next_id);
+        await loadConversation(data.next_id, { force: true });
       } else {
         conversationId = null;
-        await createNewChat();
+        createNewChat();
       }
     } catch (_) {
       appendText(
@@ -283,6 +459,7 @@
     } finally {
       busy = false;
       setComposerEnabled(true);
+      if (deleteConfirmBtn) deleteConfirmBtn.disabled = false;
     }
   }
 
@@ -294,11 +471,13 @@
       return;
     }
     conversations.forEach((row) => {
+      const rowId = asConversationId(row.id);
+      if (!rowId) return;
       const wrap = document.createElement("div");
       wrap.className = `chat-conversation-row${
-        row.id === conversationId ? " is-active" : ""
+        isSameConversation(rowId, conversationId) ? " is-active" : ""
       }`;
-      wrap.dataset.conversationId = String(row.id);
+      wrap.dataset.conversationId = String(rowId);
 
       const btn = document.createElement("button");
       btn.type = "button";
@@ -306,9 +485,10 @@
       btn.textContent = row.title || "New chat";
       btn.title = row.title || "New chat";
       btn.addEventListener("click", () => {
-        if (row.id === conversationId || busy) return;
+        // Same thread (number/string id safe) or busy matching — do not reload.
+        if (isSameConversation(rowId, conversationId) || busy || keepBusy) return;
         closeAllConversationMenus();
-        loadConversation(row.id);
+        loadConversation(rowId);
         closeSidebarMobile();
       });
 
@@ -341,7 +521,7 @@
       deleteBtn.addEventListener("click", (event) => {
         event.preventDefault();
         event.stopPropagation();
-        deleteConversation(row.id);
+        deleteConversation(row.id, row.title || "New chat");
       });
 
       moreBtn.addEventListener("click", (event) => {
@@ -559,6 +739,9 @@
 
   function replayMessage(message) {
     const role = message.role === "user" ? "user" : "assistant";
+    const content = String(message.content || "");
+    // Never replay transient system load errors into the thread.
+    if (content.includes("I couldn't load that conversation")) return;
     const meta = message.metadata || {};
     if (role === "assistant" && Array.isArray(meta.matches) && meta.matches.length) {
       const summary =
@@ -577,20 +760,31 @@
     appendText(role, message.content || "", { persist: false });
   }
 
-  async function loadConversation(id) {
-    if (!id) return;
+  async function loadConversation(id, options = {}) {
+    const targetId = asConversationId(id);
+    if (!targetId) return;
+    // Already viewing this thread — reloading would wipe in-progress matches.
+    if (
+      !options.force &&
+      isSameConversation(targetId, conversationId) &&
+      transcript.childElementCount > 0
+    ) {
+      return;
+    }
+    if (!options.force && (busy || keepBusy)) return;
+
     busy = true;
     setComposerEnabled(false);
     clearTranscript();
     try {
-      const response = await fetch(`${conversationsUrl}${id}/`, {
+      const response = await fetch(`${conversationsUrl}${targetId}/`, {
         headers: { Accept: "application/json" },
         credentials: "same-origin",
       });
       const data = await response.json().catch(() => ({}));
       if (!response.ok || !data.ok) throw new Error("load_failed");
 
-      conversationId = data.conversation.id;
+      conversationId = asConversationId(data.conversation.id) || targetId;
       upsertConversationLocal(data.conversation);
       if (data.bootstrap) bootstrap = data.bootstrap;
       setActiveTitle(data.conversation.title);
@@ -599,7 +793,7 @@
       const messages = Array.isArray(data.messages) ? data.messages : [];
       if (!messages.length) {
         persistEnabled = true;
-        startFreshGreeting({ persist: true });
+        startFreshGreeting({ persist: false });
       } else {
         persistEnabled = false;
         messages.forEach(replayMessage);
@@ -620,11 +814,10 @@
       }
     } catch (_) {
       persistEnabled = true;
-      appendText(
-        "assistant",
-        "I couldn't load that conversation. Try another one or start a new chat.",
-        { persist: false }
-      );
+      // Never inject this into an active/matching thread — it breaks UX.
+      if (!keepBusy && transcript.childElementCount === 0) {
+        await appendText("assistant", LOAD_CONVERSATION_ERROR, { persist: false });
+      }
     } finally {
       busy = false;
       setComposerEnabled(true);
@@ -632,42 +825,19 @@
     }
   }
 
-  async function createNewChat() {
+  function createNewChat() {
+    // Draft only — no DB thread until the user sends a message.
     if (busy) return;
-    busy = true;
-    setComposerEnabled(false);
-    try {
-      const response = await fetch(conversationsUrl, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Accept: "application/json",
-          "X-CSRFToken": csrfToken,
-          "X-Requested-With": "XMLHttpRequest",
-        },
-        credentials: "same-origin",
-        body: JSON.stringify({ title: "New chat" }),
-      });
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok || !data.ok) throw new Error("create_failed");
-      conversationId = data.conversation.id;
-      upsertConversationLocal(data.conversation);
-      renderConversationList();
-      setActiveTitle(data.conversation.title);
-      clearTranscript();
-      startFreshGreeting({ persist: true });
-      closeSidebarMobile();
-    } catch (_) {
-      appendText(
-        "assistant",
-        "I couldn't start a new chat just now. Please try again.",
-        { persist: false }
-      );
-    } finally {
-      busy = false;
-      setComposerEnabled(true);
-      input.focus();
-    }
+    closeAllConversationMenus();
+    conversationId = null;
+    currentStep = null;
+    clearTranscript();
+    setActiveTitle("New chat");
+    renderConversationList();
+    startFreshGreeting({ persist: false });
+    closeSidebarMobile();
+    setComposerEnabled(true);
+    input.focus();
   }
 
   function startFreshGreeting(_options = {}) {
@@ -1036,22 +1206,29 @@
         if (!dataLine) continue;
         const raw = dataLine.replace(/^data:\s?/, "");
         if (!raw || raw === "[DONE]") continue;
+        let event;
         try {
-          onEvent(JSON.parse(raw));
+          event = JSON.parse(raw);
         } catch (_) {
           /* ignore malformed chunk */
+          continue;
         }
+        await onEvent(event);
       }
     }
   }
 
-  async function loadMatches() {
+  async function loadMatches(userQuery = "") {
     keepBusy = true;
     clearSuggestions();
     currentStep = null;
     input.placeholder = "Message Grants…";
     setComposerEnabled(false);
+    // Re-pin for the streaming session so each SSE chunk stays in view.
+    stickToBottom = true;
+    scrollToBottom({ force: true });
     await syncProjectSnapshot();
+    const queryText = String(userQuery || "").trim();
 
     let statusRow = showTyping();
     let statusBubble = statusRow.querySelector(".chat-bubble");
@@ -1062,24 +1239,27 @@
     let cardIndex = 0;
     let finished = false;
 
-    const setStatus = (text) => {
+    const setStatus = async (text) => {
       if (!statusBubble) {
-        statusRow = appendText("assistant", text);
+        statusRow = await appendText("assistant", text, { persist: false });
         statusBubble = statusRow.querySelector(".chat-bubble");
+        scrollToBottom({ force: true });
         return;
       }
       statusBubble.textContent = text;
-      scrollToBottom();
+      scrollToBottom({ force: true });
     };
 
-    const ensureResultsShell = (placeText) => {
+    const ensureResultsShell = async (placeText) => {
       if (resultsRow) return;
-      resultsRow = appendAssistantHtml(
+      resultsRow = await appendAssistantHtml(
         `<p class="chat-match-summary">Gathering ranked opportunities${escapeHtml(placeText)}…</p>
-         <div class="chat-matches"></div>`
+         <div class="chat-matches"></div>`,
+        { persist: false }
       );
       summaryEl = resultsRow.querySelector(".chat-match-summary");
       matchesEl = resultsRow.querySelector(".chat-matches");
+      scrollToBottom({ force: true });
     };
 
     const appendMatchCards = (matches) => {
@@ -1092,19 +1272,20 @@
         cardIndex += 1;
       }
       bindSaveForms(resultsRow);
-      scrollToBottom();
+      scrollToBottom({ force: true });
     };
 
-    const renderFinal = (matches, location, savedCount) => {
+    const renderFinal = async (matches, location, savedCount) => {
       const placeText = placeTextFrom(location);
       if (!matches.length) {
         if (resultsRow) removeNode(resultsRow);
         const emptyMsg = `I couldn't find ranked matches yet${placeText}. You can update your project details in chat, then ask me to search again.`;
-        setStatus(emptyMsg);
-        persistMessage("assistant", emptyMsg);
+        await setStatus(emptyMsg);
+        await persistMessage("assistant", emptyMsg);
+        scrollToBottom({ force: true });
         return;
       }
-      ensureResultsShell(placeText);
+      await ensureResultsShell(placeText);
       const noun = matches.length === 1 ? "opportunity" : "opportunities";
       const summary = `Here are ${matches.length} ranked ${noun} from Grants.gov, USASpending, and GrantedAI${placeText}.`;
       if (summaryEl) {
@@ -1112,37 +1293,42 @@
       }
       seenKeys = new Set();
       cardIndex = 0;
-      matchesEl.innerHTML = matches.map((m, i) => renderCard(m, i)).join("");
+      if (matchesEl) {
+        matchesEl.innerHTML = matches.map((m, i) => renderCard(m, i)).join("");
+      }
       bindSaveForms(resultsRow);
       if (typeof savedCount === "number") updateSavedNavCount(savedCount);
       if (statusRow) removeNode(statusRow);
       statusRow = null;
       statusBubble = null;
-      persistMessage("assistant", summary, {
+      await persistMessage("assistant", summary, {
         type: "matches",
         matches,
         location: location || {},
       });
-      scrollToBottom();
+      // Removing the status row shortens the page; re-pin immediately (instant).
+      scrollToBottom({ force: true });
     };
 
     try {
-      const response = await fetch(matchesStreamUrl, {
+      const streamUrl = new URL(matchesStreamUrl, window.location.origin);
+      if (queryText) streamUrl.searchParams.set("q", queryText);
+      const response = await fetch(streamUrl.toString(), {
         headers: { Accept: "text/event-stream" },
         credentials: "same-origin",
       });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
-      await readSseEvents(response, (event) => {
+      await readSseEvents(response, async (event) => {
         const type = event.type || "";
         if (type === "status") {
-          setStatus(event.message || "Searching…");
+          await setStatus(event.message || "Searching…");
           return;
         }
         if (type === "source") {
-          setStatus(event.message || "Still searching…");
+          await setStatus(event.message || "Still searching…");
           const placeText = placeTextFrom(event.location || {});
-          ensureResultsShell(placeText);
+          await ensureResultsShell(placeText);
           appendMatchCards(event.matches || []);
           if (typeof event.saved_count === "number") {
             updateSavedNavCount(event.saved_count);
@@ -1151,7 +1337,7 @@
         }
         if (type === "done") {
           finished = true;
-          renderFinal(
+          await renderFinal(
             Array.isArray(event.matches) ? event.matches : [],
             event.location || {},
             event.saved_count
@@ -1165,13 +1351,15 @@
 
       if (!finished) {
         // Fallback if stream ended without a done event.
-        const fallback = await fetch(matchesUrl, {
+        const fallbackUrl = new URL(matchesUrl, window.location.origin);
+        if (queryText) fallbackUrl.searchParams.set("q", queryText);
+        const fallback = await fetch(fallbackUrl.toString(), {
           headers: { Accept: "application/json" },
           credentials: "same-origin",
         });
         const data = await fallback.json().catch(() => ({}));
         if (!fallback.ok) throw new Error(data.error || "match_failed");
-        renderFinal(
+        await renderFinal(
           Array.isArray(data.matches) ? data.matches : [],
           data.location || {},
           data.saved_count
@@ -1240,7 +1428,7 @@
     if (!step) return;
 
     const trimmed = String(rawText || "").trim();
-    appendText("user", displayText || trimmed);
+    await appendText("user", displayText || trimmed);
     clearSuggestions();
 
     if (step.optional && /^(skip|none|n\/a|na|-)$/i.test(trimmed)) {
@@ -1248,7 +1436,7 @@
       await saveFields({ [step.id]: "" });
     } else {
       if (!trimmed) {
-        appendText("assistant", "I need a little more detail on that one.");
+        await appendText("assistant", "I need a little more detail on that one.");
         askStep(step);
         return;
       }
@@ -1256,7 +1444,10 @@
       if (step.id === "budget_requested") {
         value = trimmed.replace(/[$,]/g, "").trim();
         if (!value || Number.isNaN(Number(value))) {
-          appendText("assistant", "Please enter a number for the budget, like 50000.");
+          await appendText(
+            "assistant",
+            "Please enter a number for the budget, like 50000."
+          );
           askStep(step);
           return;
         }
@@ -1265,7 +1456,10 @@
         const choices = (bootstrap.choices && bootstrap.choices[step.choiceKey]) || [];
         const ok = choices.some((c) => c.value === value);
         if (!ok && step.id !== "location_state") {
-          appendText("assistant", "Please pick one of the options, or type it exactly.");
+          await appendText(
+            "assistant",
+            "Please pick one of the options, or type it exactly."
+          );
           askStep(step);
           return;
         }
@@ -1274,7 +1468,7 @@
         await saveFields({ [step.id]: value });
         bootstrap.profile[step.id] = value;
       } catch (err) {
-        appendText("assistant", err.message || "Couldn't save that.");
+        await appendText("assistant", err.message || "Couldn't save that.");
         askStep(step);
         return;
       }
@@ -1303,11 +1497,11 @@
   }
 
   async function handleReadyMessage(text) {
-    appendText("user", text);
+    await appendText("user", text);
     clearSuggestions();
 
     if (wantsUpdateProject(text)) {
-      appendText(
+      await appendText(
         "assistant",
         "Sure — let's refresh your project details. You can also edit everything later in Settings."
       );
@@ -1316,11 +1510,11 @@
     }
 
     if (wantsFindGrants(text) || /^(yes|yeah|yep|ok|okay|sure|go ahead)$/i.test(text)) {
-      await loadMatches();
+      await loadMatches(text);
       return;
     }
 
-    appendText(
+    await appendText(
       "assistant",
       "I can find grant matches from your saved project profile, or walk you through updating those details. What would you like to do?"
     );
@@ -1425,12 +1619,14 @@
   });
 
   renderConversationList();
-  setActiveTitle(
-    (conversations.find((row) => row.id === conversationId) || {}).title ||
-      "New chat"
-  );
   if (conversationId) {
-    loadConversation(conversationId);
+    setActiveTitle(
+      (
+        conversations.find((row) => isSameConversation(row.id, conversationId)) ||
+        {}
+      ).title || "New chat"
+    );
+    loadConversation(conversationId, { force: true });
   } else {
     createNewChat();
   }

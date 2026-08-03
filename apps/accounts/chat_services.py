@@ -2,12 +2,20 @@
 
 from __future__ import annotations
 
+import logging
+import os
+import re
+import threading
 from decimal import Decimal
 from typing import Any
+
+from django.db.models import Count, QuerySet
 
 from apps.projects.models import Project
 
 from .models import Conversation, Message, Profile
+
+logger = logging.getLogger(__name__)
 
 
 def conversation_to_dict(conversation: Conversation) -> dict[str, Any]:
@@ -18,6 +26,16 @@ def conversation_to_dict(conversation: Conversation) -> dict[str, Any]:
         "created_at": conversation.created_at.isoformat() if conversation.created_at else "",
         "updated_at": conversation.updated_at.isoformat() if conversation.updated_at else "",
     }
+
+
+def conversations_with_messages(user) -> QuerySet[Conversation]:
+    """Only threads that have at least one saved message (no empty drafts)."""
+    return (
+        Conversation.objects.filter(user=user)
+        .annotate(message_count=Count("messages"))
+        .filter(message_count__gt=0)
+        .order_by("-updated_at", "-created_at")
+    )
 
 
 def message_to_dict(message: Message) -> dict[str, Any]:
@@ -31,14 +49,19 @@ def message_to_dict(message: Message) -> dict[str, Any]:
 
 
 def get_or_create_active_conversation(user) -> Conversation:
-    latest = (
-        Conversation.objects.filter(user=user)
-        .order_by("-updated_at", "-created_at")
-        .first()
-    )
+    """
+    Backward-compatible helper. Prefer get_latest_conversation() for the
+    ChatGPT-style flow (no empty thread until the first user message).
+    """
+    latest = get_latest_conversation(user)
     if latest:
         return latest
     return Conversation.objects.create(user=user, title="New chat")
+
+
+def get_latest_conversation(user) -> Conversation | None:
+    """Latest non-empty conversation, or None if the user has no threads yet."""
+    return conversations_with_messages(user).first()
 
 
 def create_conversation(user, title: str = "New chat") -> Conversation:
@@ -107,6 +130,98 @@ def upsert_project_for_conversation(
     return project
 
 
+def _fallback_chat_title(user_query: str) -> str:
+    """Rule-based short title when AI is unavailable."""
+    try:
+        from services.query_context import resolve_search_context
+
+        ctx = resolve_search_context({}, user_query=user_query)
+        parts: list[str] = []
+        state = (ctx.get("location_state") or "").strip().upper()
+        priority = (ctx.get("priority_area") or "").strip()
+        if state:
+            parts.append(state)
+        if priority:
+            parts.append(priority)
+        if parts:
+            return f"{' '.join(parts)} grants"[:60]
+    except Exception:
+        logger.debug("fallback title context parse failed", exc_info=True)
+
+    cleaned = re.sub(
+        r"\b(find|search|show|get|please|grants?|the|a|an|me|for|in|with)\b",
+        " ",
+        user_query or "",
+        flags=re.I,
+    )
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" .,!?:;-")
+    if not cleaned:
+        return "Grant search"
+    words = cleaned.split()[:5]
+    title = " ".join(words)
+    return (title[:1].upper() + title[1:])[:60]
+
+
+def generate_chat_title(user_query: str) -> str:
+    """
+    Short professional sidebar title for a conversation.
+    Uses OpenAI when configured; otherwise a local fallback.
+    """
+    text = (user_query or "").strip()
+    if not text:
+        return "New chat"
+
+    fallback = _fallback_chat_title(text)
+    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    if not api_key:
+        return fallback
+
+    model = os.getenv("OPENAI_MODEL", "gpt-5.5").strip() or "gpt-5.5"
+    system = (
+        "You name chat threads for a grants discovery app. "
+        "Return ONLY a short professional title (3 to 6 words). "
+        "Title Case. No quotes, no trailing punctuation, no emoji. "
+        "Capture location/topic/intent when present "
+        "(e.g. 'NY Education Grants', 'California Funding Search')."
+    )
+    user = f"User message:\n{text[:400]}"
+
+    try:
+        from openai import OpenAI
+
+        client = OpenAI(api_key=api_key)
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+        )
+        title = (response.choices[0].message.content or "").strip()
+        title = title.strip(" \"'`").split("\n")[0].strip()
+        title = re.sub(r"\s+", " ", title)
+        if not title or len(title) < 3:
+            return fallback
+        return title[:60]
+    except Exception:
+        logger.exception("AI chat title generation failed; using fallback")
+        return fallback
+
+
+def _should_retitle(conversation: Conversation, first_user_text: str) -> bool:
+    current = (conversation.title or "").strip()
+    if current in ("", "New chat", "New Chat"):
+        return True
+    # Replace unprofessional titles that are just the raw first query.
+    if first_user_text and current.lower() == first_user_text[: len(current)].lower():
+        return True
+    if len(current) > 48 and current.lower().startswith(
+        (first_user_text or "").strip().lower()[:24]
+    ):
+        return True
+    return False
+
+
 def add_message(
     conversation: Conversation,
     *,
@@ -128,12 +243,22 @@ def add_message(
         metadata=metadata or {},
     )
 
-    # Title from first user message when still default.
-    if (
-        role == Message.Role.USER
-        and conversation.title in ("New chat", "New Chat", "")
-        and text
-    ):
-        conversation.title = text[:80]
-    conversation.save(update_fields=["title", "updated_at"])
+    # Fast local title first; upgrade with AI in the background so the chat
+    # request never blocks (and never races a conversation reload).
+    if role == Message.Role.USER and text and _should_retitle(conversation, text):
+        conversation.title = _fallback_chat_title(text)
+        conversation.save(update_fields=["title", "updated_at"])
+        conversation_id = conversation.pk
+        query_text = text
+
+        def _upgrade_title() -> None:
+            try:
+                title = generate_chat_title(query_text)
+                Conversation.objects.filter(pk=conversation_id).update(title=title[:60])
+            except Exception:
+                logger.exception("Background chat title upgrade failed")
+
+        threading.Thread(target=_upgrade_title, daemon=True).start()
+    else:
+        conversation.save(update_fields=["updated_at"])
     return message

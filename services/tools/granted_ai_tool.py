@@ -2,24 +2,27 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
+from services.query_context import apply_tool_defaults
 from services.tools._normalize import compact_source_rows
 
 logger = logging.getLogger(__name__)
 
 
-def build_granted_ai_tool():
-    """Construct the GrantedAI source tool registered on the matching agent."""
+def build_granted_ai_tool(defaults: dict[str, Any] | None = None):
+    """Construct the GrantedAI source tool. Blank args fall back to profile defaults."""
     from agents import function_tool
 
     from services.granted_ai import search_grants
-    from services.location_utils import normalize_location
+
+    tool_defaults = dict(defaults or {})
 
     @function_tool
-    def granted_ai(
-        keyword: str,
+    async def granted_ai(
+        keyword: str = "",
         priority_area: str = "",
         location_city: str = "",
         location_state: str = "",
@@ -29,30 +32,33 @@ def build_granted_ai_tool():
         """
         Search GrantedAI for grants and funding opportunities.
 
-        Use this tool to discover foundation, state, federal, and other grants from
-        Granted's database and AI discovery pipeline. Pass the user's focus keyword,
-        priority area, location, and organization type so results follow their filters.
+        Omit a parameter (or pass "") to use the saved user-profile default for that
+        field. Pass overrides when the user names a different location/topic/org type.
 
         Parameters:
-            keyword: Primary search phrase from the user's focus title or description.
-            priority_area: User funding category used to refine topical relevance.
-            location_city: User city for context.
-            location_state: Two-letter US state code used for state-aware discovery.
-            org_type: Organization type from the profile (e.g. 501c3, school, government).
-            limit: Maximum number of grants to return (default 10).
-
-        Returns:
-            A list of normalized grant records with source set to granted_ai.
-            Returns an empty list when the request fails, is rate-limited, or has no matches.
+            keyword: Search phrase; defaults to profile title/description.
+            priority_area: Funding category; defaults to profile priority_area.
+            location_city: City; defaults to profile city.
+            location_state: Two-letter US state; defaults to profile state.
+            org_type: Organization type; defaults to profile org_type.
+            limit: Maximum grants to return (default 10).
         """
-        city, state = normalize_location(location_city, location_state)
+        params = apply_tool_defaults(
+            keyword=keyword,
+            priority_area=priority_area,
+            location_city=location_city,
+            location_state=location_state,
+            org_type=org_type,
+            defaults=tool_defaults,
+        )
         try:
-            results = search_grants(
-                keyword=keyword,
-                priority_area=priority_area,
-                location_city=city,
-                location_state=state,
-                org_type=org_type,
+            results = await asyncio.to_thread(
+                search_grants,
+                keyword=params["keyword"],
+                priority_area=params["priority_area"],
+                location_city=params["location_city"],
+                location_state=params["location_state"],
+                org_type=params["org_type"],
                 limit=limit,
                 use_discover=True,
             )

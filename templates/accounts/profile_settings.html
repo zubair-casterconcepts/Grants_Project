@@ -31,49 +31,96 @@
       </ul>
     {% endif %}
 
+    <section class="settings-password" aria-labelledby="profile-heading">
+      <div class="settings-password-head">
+        <h1 id="profile-heading">Profile</h1>
+        <p>Organization and role details for your account (not used for grant matching filters).</p>
+      </div>
+
+      <form class="auth-form project-form" method="post" action="{% url 'accounts:profile_settings' %}" novalidate data-loader-message="Saving your profile…">
+        {% csrf_token %}
+        {% if account_form.non_field_errors %}
+          <ul class="dash-messages">
+            {% for error in account_form.non_field_errors %}
+              <li class="error">{{ error }}</li>
+            {% endfor %}
+          </ul>
+        {% endif %}
+
+        {% for field in account_form %}
+          <label class="field">
+            <span>{{ field.label }}</span>
+            {{ field }}
+            {% if field.errors %}
+              <small class="field-error">{{ field.errors|striptags }}</small>
+            {% endif %}
+          </label>
+        {% endfor %}
+
+        <button type="submit" class="btn-primary">Update profile</button>
+      </form>
+    </section>
+
     <section class="settings-password" aria-labelledby="password-heading">
       <div class="settings-password-head">
-        <h1 id="password-heading">Change password</h1>
+        <h2 id="password-heading">Change password</h2>
         <p>Update the password you use to sign in to Grants.</p>
       </div>
 
-      <form class="auth-form project-form" id="password-change-form" autocomplete="off" novalidate>
+      <form
+        class="auth-form project-form"
+        id="password-change-form"
+        method="post"
+        action="{% url 'accounts:change_password' %}"
+        autocomplete="off"
+        novalidate
+        data-loader-message="Updating your password…"
+      >
+        {% csrf_token %}
+        {% if password_form.non_field_errors %}
+          <ul class="dash-messages">
+            {% for error in password_form.non_field_errors %}
+              <li class="error">{{ error }}</li>
+            {% endfor %}
+          </ul>
+        {% endif %}
+
         <label class="field">
-          <span>Current password</span>
-          <input
-            type="password"
-            name="old_password"
-            autocomplete="current-password"
-            placeholder="Enter your current password"
-          >
+          <span>{{ password_form.old_password.label }}</span>
+          {{ password_form.old_password }}
+          {% if password_form.old_password.errors %}
+            <small class="field-error">{{ password_form.old_password.errors|striptags }}</small>
+          {% endif %}
         </label>
+
         <label class="field">
-          <span>New password</span>
-          <input
-            type="password"
-            name="new_password"
-            autocomplete="new-password"
-            placeholder="Enter a new password"
-          >
+          <span>{{ password_form.new_password1.label }}</span>
+          {{ password_form.new_password1 }}
+          {% if password_form.new_password1.errors %}
+            <small class="field-error">{{ password_form.new_password1.errors|striptags }}</small>
+          {% endif %}
         </label>
+
         <label class="field">
-          <span>Confirm new password</span>
-          <input
-            type="password"
-            name="confirm_password"
-            autocomplete="new-password"
-            placeholder="Re-enter the new password"
-          >
+          <span>{{ password_form.new_password2.label }}</span>
+          {{ password_form.new_password2 }}
+          {% if password_form.new_password2.errors %}
+            <small class="field-error">{{ password_form.new_password2.errors|striptags }}</small>
+          {% endif %}
         </label>
-        <button type="button" class="btn-primary" id="password-change-btn" disabled>
+
+        <button type="submit" class="btn-primary" id="password-change-btn" disabled>
           Update password
         </button>
-        <p class="settings-password-note">Password updates will be wired up next — this screen is UI only for now.</p>
+        <p class="settings-password-note">
+          Use your current password, then choose a new one. You’ll stay signed in after updating.
+        </p>
       </form>
     </section>
   </main>
 
   {% include "partials/page_loader.html" %}
   <script src="{% static 'js/profile-menu.js' %}" defer></script>
+  <script src="{% static 'js/password-change.js' %}" defer></script>
 </body>
 </html>

@@ -2,24 +2,27 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
+from services.query_context import apply_tool_defaults
 from services.tools._normalize import compact_source_rows
 
 logger = logging.getLogger(__name__)
 
 
-def build_grants_gov_tool():
-    """Construct the Grants.gov source tool registered on the matching agent."""
+def build_grants_gov_tool(defaults: dict[str, Any] | None = None):
+    """Construct the Grants.gov source tool. Blank args fall back to profile defaults."""
     from agents import function_tool
 
     from services.grants_gov import search_with_filters
-    from services.location_utils import normalize_location
+
+    tool_defaults = dict(defaults or {})
 
     @function_tool
-    def grants_gov(
-        keyword: str,
+    async def grants_gov(
+        keyword: str = "",
         priority_area: str = "",
         location_city: str = "",
         location_state: str = "",
@@ -28,29 +31,31 @@ def build_grants_gov_tool():
         """
         Search Grants.gov for open and forecasted federal funding opportunities.
 
-        Use this tool to retrieve current opportunity listings that align with the
-        user's funding focus and location. Results include provider/agency details
-        (name, code, contact/address when available), award ranges, eligibility,
-        ALN/CFDA codes, and opportunity metadata from Grants.gov.
+        Omit a parameter (or pass "") to use the saved user-profile default for that
+        field. When the user names a location/topic/priority in the message, pass
+        that override instead.
 
         Parameters:
-            keyword: Primary search phrase from the user's focus title or description.
-            priority_area: User funding category used to narrow opportunity topics.
-            location_city: User city; included in location-aware filtering.
-            location_state: Two-letter US state code from the user profile.
-            rows: Maximum number of opportunities to return (default 25).
-
-        Returns:
-            A list of normalized opportunity records with source set to grants_gov.
-            Returns an empty list when the search fails or yields no matches.
+            keyword: Search phrase; defaults to profile title/description.
+            priority_area: Funding category; defaults to profile priority_area.
+            location_city: City filter; defaults to profile city.
+            location_state: Two-letter US state; defaults to profile state.
+            rows: Maximum opportunities to return (default 25).
         """
-        city, state = normalize_location(location_city, location_state)
+        params = apply_tool_defaults(
+            keyword=keyword,
+            priority_area=priority_area,
+            location_city=location_city,
+            location_state=location_state,
+            defaults=tool_defaults,
+        )
         try:
-            results = search_with_filters(
-                keyword=keyword,
-                priority_area=priority_area,
-                location_city=city,
-                location_state=state,
+            results = await asyncio.to_thread(
+                search_with_filters,
+                keyword=params["keyword"],
+                priority_area=params["priority_area"],
+                location_city=params["location_city"],
+                location_state=params["location_state"],
                 rows=rows,
             )
         except Exception:

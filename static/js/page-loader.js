@@ -139,9 +139,26 @@
       const form = event.target;
       if (!(form instanceof HTMLFormElement)) return;
       if (form.dataset.noLoader === "true") return;
+      // Chat / AJAX forms must never flash the full-page loader.
+      if (form.id === "chat-composer" || form.classList.contains("chat-composer")) {
+        return;
+      }
       if (event.defaultPrevented) return;
 
       const action = form.getAttribute("action") || window.location.href;
+      // Same-page chat posts (empty action on /home/) are not real navigations.
+      try {
+        const url = new URL(action, window.location.href);
+        if (
+          url.pathname === window.location.pathname &&
+          !form.getAttribute("action")
+        ) {
+          return;
+        }
+      } catch (_) {
+        /* continue */
+      }
+
       const message = resolveMessage(action, form.dataset.loaderMessage);
       showLoader(message);
       startRotatingHints(action);

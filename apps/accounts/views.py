@@ -1,10 +1,11 @@
 from django.contrib import messages
+from django.contrib.auth import update_session_auth_hash
 from django.contrib.auth.decorators import login_required
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.views.decorators.http import require_http_methods, require_POST
 
-from .forms import ProfileIntakeForm
+from .forms import PasswordUpdateForm, ProfileAccountForm, ProfileIntakeForm
 from .models import SavedGrant
 from .services import get_or_create_profile
 
@@ -19,7 +20,7 @@ def onboarding_view(request):
 @login_required
 @require_http_methods(["GET", "POST"])
 def settings_view(request):
-    """Project / org settings — priority area, organization, location, etc."""
+    """Project settings used for grant matching (topic, location, budget, etc.)."""
     profile = get_or_create_profile(request.user)
     if profile.needs_onboarding:
         return redirect("auth:home")
@@ -48,20 +49,62 @@ def settings_view(request):
 
 
 @login_required
-@require_http_methods(["GET"])
+@require_http_methods(["GET", "POST"])
 def profile_settings_view(request):
-    """Profile settings — password change UI (backend wiring later)."""
+    """Profile settings — organization/role at top; password form below."""
     profile = get_or_create_profile(request.user)
     if profile.needs_onboarding:
         return redirect("auth:home")
+
+    password_form = PasswordUpdateForm(user=request.user)
+    if request.method == "POST":
+        account_form = ProfileAccountForm(request.POST, instance=profile)
+        if account_form.is_valid():
+            account_form.save()
+            messages.success(request, "Profile updated.")
+            return redirect("accounts:profile_settings")
+    else:
+        account_form = ProfileAccountForm(instance=profile)
 
     return render(
         request,
         "accounts/profile_settings.html",
         {
             "profile": profile,
+            "account_form": account_form,
+            "password_form": password_form,
             "saved_count": SavedGrant.objects.filter(user=request.user).count(),
         },
+    )
+
+
+@login_required
+@require_POST
+def change_password_view(request):
+    """Verify current password and set a new one; keep the user signed in."""
+    profile = get_or_create_profile(request.user)
+    if profile.needs_onboarding:
+        return redirect("auth:home")
+
+    password_form = PasswordUpdateForm(user=request.user, data=request.POST)
+    if password_form.is_valid():
+        user = password_form.save()
+        update_session_auth_hash(request, user)
+        messages.success(request, "Password updated successfully.")
+        return redirect("accounts:profile_settings")
+
+    account_form = ProfileAccountForm(instance=profile)
+    messages.error(request, "Could not update password. Please check the fields below.")
+    return render(
+        request,
+        "accounts/profile_settings.html",
+        {
+            "profile": profile,
+            "account_form": account_form,
+            "password_form": password_form,
+            "saved_count": SavedGrant.objects.filter(user=request.user).count(),
+        },
+        status=400,
     )
 
 

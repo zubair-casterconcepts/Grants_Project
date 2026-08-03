@@ -11,16 +11,17 @@ from apps.accounts.chat_services import (
     add_message,
     apply_project_to_profile,
     conversation_to_dict,
+    conversations_with_messages,
     create_conversation,
-    get_or_create_active_conversation,
     message_to_dict,
     upsert_project_for_conversation,
 )
-from apps.accounts.forms import ProfileIntakeForm, STATE_CHOICES
+from apps.accounts.forms import ProfileAccountForm, ProfileIntakeForm, STATE_CHOICES
 from apps.accounts.models import Conversation, Profile, SavedGrant
 from apps.accounts.services import get_or_create_profile
 from services.grant_agent import iter_grant_matching_events, run_grant_matching_agent
 from services.location_utils import normalize_location
+from services.query_context import resolve_search_context
 
 from .services import attempt_login, attempt_logout
 
@@ -137,12 +138,10 @@ def home_view(request):
     """ChatGPT-style chat shell with conversation sidebar."""
     profile = get_or_create_profile(request.user)
     saved_count = SavedGrant.objects.filter(user=request.user).count()
-    active = get_or_create_active_conversation(request.user)
+    # Always land on a draft New chat (no auto-open of last thread).
+    # Threads are only created after the first user message.
     conversations = [
-        conversation_to_dict(row)
-        for row in Conversation.objects.filter(user=request.user).order_by(
-            "-updated_at", "-created_at"
-        )[:100]
+        conversation_to_dict(row) for row in conversations_with_messages(request.user)[:100]
     ]
     return render(
         request,
@@ -155,9 +154,9 @@ def home_view(request):
             "chat_profile_url": "/home/chat/profile/",
             "conversations_url": "/home/conversations/",
             "chat_bootstrap": _chat_bootstrap(profile),
-            "active_conversation_id": active.id,
+            "active_conversation_id": None,
             "conversations_bootstrap": {
-                "active_id": active.id,
+                "active_id": None,
                 "conversations": conversations,
             },
         },
@@ -173,16 +172,18 @@ def matches_api_view(request):
         return JsonResponse({"error": "onboarding_required"}, status=403)
 
     try:
-        matches = run_grant_matching_agent(profile)
+        user_query = (request.GET.get("q") or "").strip()
+        matches = run_grant_matching_agent(profile, user_query=user_query)
         prepared, saved_count = _prepare_matches(request.user, matches)
+        ctx = resolve_search_context(profile, user_query=user_query)
         return JsonResponse(
             {
                 "matches": prepared,
                 "match_count": len(prepared),
                 "saved_count": saved_count,
                 "location": {
-                    "city": profile.location_city or "",
-                    "state": profile.location_state or "",
+                    "city": ctx.get("location_city") or "",
+                    "state": ctx.get("location_state") or "",
                 },
             }
         )
@@ -206,9 +207,11 @@ def matches_stream_api_view(request):
     if profile.needs_onboarding:
         return JsonResponse({"error": "onboarding_required"}, status=403)
 
+    user_query = (request.GET.get("q") or "").strip()
+
     def event_stream():
         try:
-            for event in iter_grant_matching_events(profile):
+            for event in iter_grant_matching_events(profile, user_query=user_query):
                 payload = dict(event)
                 if "matches" in payload:
                     prepared, saved_count = _prepare_matches(
@@ -304,9 +307,7 @@ def chat_profile_api(request):
 
     complete = bool(payload.get("complete"))
     if complete:
-        data = {
-            "organization": updates.get("organization", profile.organization),
-            "role_title": updates.get("role_title", profile.role_title),
+        match_data = {
             "title": updates.get("title", profile.title),
             "description": updates.get("description", profile.description),
             "priority_area": updates.get("priority_area", profile.priority_area),
@@ -321,13 +322,24 @@ def chat_profile_api(request):
                 "eligibility_notes", profile.eligibility_notes
             ),
         }
-        form = ProfileIntakeForm(data, instance=profile)
-        if not form.is_valid():
+        account_data = {
+            "organization": updates.get("organization", profile.organization),
+            "role_title": updates.get("role_title", profile.role_title),
+        }
+        form = ProfileIntakeForm(match_data, instance=profile)
+        account_form = ProfileAccountForm(account_data, instance=profile)
+        if not form.is_valid() or not account_form.is_valid():
+            errors = {}
+            errors.update(form.errors)
+            errors.update(account_form.errors)
             return JsonResponse(
-                {"ok": False, "error": "validation_failed", "errors": form.errors},
+                {"ok": False, "error": "validation_failed", "errors": errors},
                 status=400,
             )
         profile = form.save(commit=False)
+        account = account_form.save(commit=False)
+        profile.organization = account.organization
+        profile.role_title = account.role_title
         profile.ntee_code = profile.ntee_code or ""
         profile.onboarding_completed = True
         profile.save()
@@ -370,11 +382,9 @@ def _user_conversation(user, conversation_id: int) -> Conversation:
 @login_required
 @require_http_methods(["GET", "POST"])
 def conversations_api_view(request):
-    """List conversations (newest first) or create a new empty chat."""
+    """List non-empty conversations (newest first) or create a chat thread."""
     if request.method == "GET":
-        rows = Conversation.objects.filter(user=request.user).order_by(
-            "-updated_at", "-created_at"
-        )[:100]
+        rows = conversations_with_messages(request.user)[:100]
         return JsonResponse(
             {
                 "ok": True,
@@ -382,12 +392,8 @@ def conversations_api_view(request):
             }
         )
 
-    try:
-        payload = json.loads(request.body.decode("utf-8") or "{}")
-    except json.JSONDecodeError:
-        payload = {}
-    title = (payload.get("title") or "New chat").strip() or "New chat"
-    conversation = create_conversation(request.user, title=title)
+    # Title stays "New chat" until the first user message (then AI short title).
+    conversation = create_conversation(request.user, title="New chat")
     return JsonResponse(
         {"ok": True, "conversation": conversation_to_dict(conversation)},
         status=201,
@@ -405,9 +411,7 @@ def conversation_detail_api(request, conversation_id: int):
         conversation.delete()
         remaining = [
             conversation_to_dict(row)
-            for row in Conversation.objects.filter(user=request.user).order_by(
-                "-updated_at", "-created_at"
-            )[:100]
+            for row in conversations_with_messages(request.user)[:100]
         ]
         next_id = remaining[0]["id"] if remaining else None
         return JsonResponse(

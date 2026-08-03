@@ -1,32 +1,35 @@
 """
-OpenAI Agents SDK grant matcher.
+OpenAI Agents SDK grant matcher (async-first).
 
-Separate tools are registered on the agent:
+Separate async tools are registered on the agent:
   - grants_gov
   - usaspending
   - granted_ai
 
-The agent chooses which sources to call, then ranks/keeps grants by
-topic, category, location, and budget. A direct multi-source merge remains
-as a safety fallback so the dashboard never breaks.
+Primary path: Agents SDK (`Runner.run` / `run_streamed`) for tool calls and
+scoring. Fallback: `asyncio.gather` over the same source clients (no
+ThreadPoolExecutor). Sync Django views bridge via a small event-loop helper.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
 import re
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections.abc import AsyncIterator, Iterator
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Awaitable, Callable, TypeVar
 
 from pydantic import BaseModel, Field
 
-from services.location_utils import location_from_profile
+from services.query_context import resolve_search_context, scoring_criteria
 
 logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
 
 _INSTRUCTIONS_PATH = Path(__file__).with_name("grant_agent_instructions.md")
 
@@ -38,7 +41,7 @@ You are the Grants matching agent. Identify the strongest funding opportunities 
 ## Operating flow
 
 1. Review the profile (topic, priority area, location, budget, org type).
-2. Call grants_gov, usaspending, and granted_ai. Prefer all three sources.
+2. Call grants_gov, usaspending, and granted_ai in the same turn so they can run concurrently.
 3. Pass keyword, priority_area, location_city, and location_state on every tool call.
 4. For granted_ai, also pass org_type from the profile when available.
 5. Keep relevant opportunities and rank by topic, category, location, then budget.
@@ -119,19 +122,129 @@ class GrantMatchResult(BaseModel):
     summary: str = ""
 
 
+class GrantScoreRow(BaseModel):
+    index: int
+    score: float = Field(ge=0.0, le=1.0)
+    chance_tier: str = Field(description="high, medium, or low")
+    reason: str = ""
+
+
+class GrantScoreResult(BaseModel):
+    scores: list[GrantScoreRow] = Field(default_factory=list)
+
+
+def _run_async(coro: Awaitable[T]) -> T:
+    """Run an async coroutine from sync Django code (no running loop expected)."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+
+    # Nested event loop (tests / ASGI edge cases): isolate on a worker thread.
+    result: dict[str, T] = {}
+    error: dict[str, BaseException] = {}
+
+    def _target() -> None:
+        try:
+            result["value"] = asyncio.run(coro)
+        except BaseException as exc:  # noqa: BLE001 — re-raised below
+            error["exc"] = exc
+
+    import threading
+
+    thread = threading.Thread(target=_target, daemon=True)
+    thread.start()
+    thread.join()
+    if "exc" in error:
+        raise error["exc"]
+    return result["value"]
+
+
+def _iter_async_generator(agen: AsyncIterator[T]) -> Iterator[T]:
+    """Drive an async generator from sync SSE views without ThreadPoolExecutor."""
+    loop = asyncio.new_event_loop()
+    try:
+        asyncio.set_event_loop(loop)
+        while True:
+            try:
+                yield loop.run_until_complete(agen.__anext__())  # type: ignore[attr-defined]
+            except StopAsyncIteration:
+                break
+    finally:
+        try:
+            loop.run_until_complete(agen.aclose())  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        try:
+            loop.close()
+        finally:
+            asyncio.set_event_loop(None)
+
+
+def _agent_enabled() -> bool:
+    """Agents SDK is on by default when an API key exists; set GRANT_USE_AGENT=0 to disable."""
+    flag = os.getenv("GRANT_USE_AGENT", "1").strip().lower()
+    if flag in {"0", "false", "no", "off"}:
+        return False
+    return bool(os.getenv("OPENAI_API_KEY", "").strip())
+
+
+def _matching_prompt(payload: dict[str, Any], user_query: str = "") -> str:
+    return (
+        "Run the matching flow for this search context. "
+        "DEFAULTS come from the saved user profile. "
+        "OVERRIDES come from the latest user message — use overrides when present, "
+        "otherwise keep profile defaults for that field. "
+        "Call grants_gov, usaspending, and granted_ai in the SAME turn so they can "
+        "run concurrently. You may omit tool args to use baked-in defaults, or pass "
+        "overrides explicitly. "
+        "Preserve agency name, agency_address, and other provider fields. "
+        "Set chance_percent to round(score * 100).\n\n"
+        f"USER_QUERY:\n{(user_query or '').strip() or '(none — use all profile defaults)'}\n\n"
+        f"SEARCH_CONTEXT_JSON:\n{json.dumps(payload, indent=2)}"
+    )
+
+
+def _rows_from_tool_output(output: Any) -> list[dict[str, Any]]:
+    """Normalize Agents SDK tool output into grant row dicts."""
+    if isinstance(output, list):
+        return [row for row in output if isinstance(row, dict)]
+    if isinstance(output, str) and output.strip():
+        try:
+            data = json.loads(output)
+        except json.JSONDecodeError:
+            return []
+        if isinstance(data, list):
+            return [row for row in data if isinstance(row, dict)]
+    return []
+
+
+def _tool_name_from_item(item: Any, call_map: dict[str, str]) -> str:
+    name = getattr(item, "tool_name", None)
+    if name:
+        return str(name)
+    origin = getattr(item, "tool_origin", None)
+    if origin is not None and getattr(origin, "agent_tool_name", None):
+        return str(origin.agent_tool_name)
+    call_id = getattr(item, "call_id", None)
+    if call_id and call_id in call_map:
+        return call_map[str(call_id)]
+    raw = getattr(item, "raw_item", None)
+    if isinstance(raw, dict):
+        return str(raw.get("name") or "")
+    return str(getattr(raw, "name", "") or "")
+
+
 def _profile_payload(profile: Any) -> dict[str, Any]:
-    city, state = location_from_profile(profile)
-    return {
-        "organization": getattr(profile, "organization", "") or "",
-        "title": getattr(profile, "title", "") or "",
-        "description": getattr(profile, "description", "") or "",
-        "priority_area": getattr(profile, "priority_area", "") or "",
-        "location_city": city,
-        "location_state": state,
-        "org_type": getattr(profile, "org_type", "") or "",
-        "budget_requested": str(getattr(profile, "budget_requested", "") or ""),
-        "eligibility_notes": getattr(profile, "eligibility_notes", "") or "",
-    }
+    """Saved profile fields only (no per-message overrides)."""
+    from services.query_context import profile_defaults
+
+    return profile_defaults(profile)
+
+
+def _search_context(profile: Any, user_query: str = "") -> dict[str, Any]:
+    """Profile defaults + latest user-query overrides for tools/scoring."""
+    return resolve_search_context(profile, user_query=user_query or "")
 
 
 def _compact(items: list[dict[str, Any]], source: str) -> list[dict[str, Any]]:
@@ -466,118 +579,212 @@ def _grant_score_payload(row: dict[str, Any], index: int) -> dict[str, Any]:
         "opp_status": row.get("opp_status") or "",
         "pop_city": row.get("pop_city") or "",
         "pop_state": row.get("pop_state") or row.get("state") or "",
-        "local_score": row.get("score"),
-        "local_reason": row.get("reason") or "",
     }
 
 
-def _apply_ai_scores(
+def _neutral_rows(matches: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Unscored merge rows (no local relevance scoring)."""
+    prepared: list[dict[str, Any]] = []
+    for item in matches:
+        row = dict(item)
+        fit = row.get("fit_score")
+        score = None
+        if fit not in (None, ""):
+            try:
+                score = max(0.0, min(1.0, float(fit)))
+            except (TypeError, ValueError):
+                score = None
+        if score is None:
+            score = 0.5
+        row["score"] = round(score, 2)
+        row["chance_percent"] = int(round(score * 100))
+        tier = _chance_tier(score)
+        row["chance_tier"] = tier
+        row["chance_label"] = _chance_label(tier)
+        row["score_method"] = "pending"
+        row.setdefault("reason", row.get("match_reasons") or "Awaiting AI ranking.")
+        row.setdefault("amount", row.get("amount") or "")
+        prepared.append(row)
+    return _attach_display_fields(prepared)
+
+
+def _merge_score_rows(
     matches: list[dict[str, Any]],
-    profile: dict[str, Any],
+    candidates: list[dict[str, Any]],
+    score_rows: list[Any],
+) -> list[dict[str, Any]]:
+    """Apply structured score rows onto candidate grants."""
+    by_index: dict[int, dict[str, Any]] = {}
+    for item in score_rows:
+        if isinstance(item, GrantScoreRow):
+            by_index[item.index] = item.model_dump()
+            continue
+        if not isinstance(item, dict):
+            continue
+        try:
+            idx = int(item.get("index"))
+        except (TypeError, ValueError):
+            continue
+        by_index[idx] = item
+
+    if not by_index:
+        return _attach_display_fields(candidates[:12])
+
+    rescored: list[dict[str, Any]] = []
+    for i, row in enumerate(candidates):
+        out = dict(row)
+        ai = by_index.get(i)
+        if not ai:
+            rescored.append(out)
+            continue
+        try:
+            score = max(0.0, min(1.0, float(ai.get("score"))))
+        except (TypeError, ValueError):
+            rescored.append(out)
+            continue
+        tier = str(ai.get("chance_tier") or "").strip().lower()
+        if tier not in {"high", "medium", "low"}:
+            tier = _chance_tier(score)
+        reason = str(ai.get("reason") or "").strip()[:180]
+        out["score"] = round(score, 2)
+        out["chance_percent"] = int(round(score * 100))
+        out["chance_tier"] = tier
+        out["chance_label"] = _chance_label(tier)
+        if reason:
+            out["reason"] = reason
+        out["score_method"] = "ai"
+        rescored.append(out)
+
+    if len(matches) > len(candidates):
+        rescored.extend(_neutral_rows(matches[len(candidates) :]))
+
+    return _attach_display_fields(_rank_by_chance(rescored)[:12])
+
+
+async def _apply_ai_scores_async(
+    matches: list[dict[str, Any]],
+    context: dict[str, Any],
 ) -> list[dict[str, Any]]:
     """
-    AI scores take priority over local scores.
-    On any failure, return the locally scored matches unchanged.
+    AI-only scoring via Agents SDK (preferred) against active search criteria.
+    Falls back to AsyncOpenAI chat completions, then neutral ordering.
     """
-    if not matches or not _ai_scoring_enabled():
+    if not matches:
         return matches
+    baseline = _neutral_rows(list(matches)[:18])
+    if not _ai_scoring_enabled():
+        return _attach_display_fields(_rank_by_chance(baseline)[:12])
 
-    candidates = list(matches[:18])
+    criteria = scoring_criteria(context if isinstance(context, dict) else {})
+    candidates = list(baseline)
     payload = {
-        "profile": profile,
+        "user_query": criteria.get("user_query") or "",
+        "search_criteria": criteria,
         "grants": [_grant_score_payload(row, i) for i, row in enumerate(candidates)],
     }
-    model = os.getenv("OPENAI_MODEL", "gpt-5.5").strip() or "gpt-5.5"
-    system = (
-        "You score grant opportunities for how likely the applicant is to win/fit. "
-        "Use ONLY the provided profile and grant fields (topic/priority, location, "
-        "budget, eligibility/org type, status/deadline, categories). "
-        "Return JSON: {\"scores\":[{\"index\":0,\"score\":0.0,\"chance_tier\":\"high|medium|low\",\"reason\":\"...\"}]}. "
-        "Include every grant index exactly once. score is 0.0-1.0. "
+    score_prompt = (
+        "Score these grants against search_criteria / user_query only. "
+        "Never use a conflicting older location/topic/budget outside search_criteria. "
+        "Include every grant index exactly once. "
         "chance_tier: high>=0.75, medium>=0.55, else low. "
-        "reason must be short (max 140 chars) and cite the strongest fit factors."
-    )
-    user = (
-        "Score these grants for the applicant. Prefer semantic fit over exact keywords. "
-        "local_score is only a weak hint — your score has priority.\n\n"
+        "reason max 140 chars.\n\n"
         f"{json.dumps(payload, ensure_ascii=True)}"
     )
 
+    # 1) Agents SDK scoring agent (no tools — structured output task).
     try:
-        from openai import OpenAI
+        from agents import Agent, Runner
 
-        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY", "").strip() or None)
-        response = client.chat.completions.create(
-            model=model,
-            temperature=0.2,
-            response_format={"type": "json_object"},
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
+        scoring_agent = Agent(
+            name="Grant Scoring Agent",
+            instructions=(
+                "You score grant opportunities for fit/chance against SEARCH_CRITERIA only. "
+                "The user_query is the primary intent. search_criteria already applies "
+                "query overrides on top of profile defaults. "
+                "Score using topic/priority, location, budget, eligibility/org type, status. "
+                "Return structured scores for every grant index."
+            ),
+            tools=[],
+            output_type=GrantScoreResult,
+            model=os.getenv("OPENAI_MODEL", "gpt-5.5"),
         )
+        result = await Runner.run(scoring_agent, score_prompt, max_turns=4)
+        final = result.final_output
+        if isinstance(final, GrantScoreResult) and final.scores:
+            return _merge_score_rows(matches, candidates, final.scores)
+        if isinstance(final, dict) and final.get("scores"):
+            return _merge_score_rows(matches, candidates, final["scores"])
+        logger.warning("Scoring agent returned no scores; trying AsyncOpenAI fallback")
+    except Exception:
+        logger.exception("Agents SDK scoring failed; trying AsyncOpenAI fallback")
+
+    # 2) AsyncOpenAI JSON fallback (keeps ranking working if agent path fails).
+    model = os.getenv("OPENAI_MODEL", "gpt-5.5").strip() or "gpt-5.5"
+    system = (
+        "You score grant opportunities for fit/chance against SEARCH_CRITERIA only. "
+        "Return JSON: {\"scores\":[{\"index\":0,\"score\":0.0,\"chance_tier\":\"high|medium|low\",\"reason\":\"...\"}]}. "
+        "Include every grant index exactly once. score is 0.0-1.0. "
+        "chance_tier: high>=0.75, medium>=0.55, else low."
+    )
+    try:
+        from openai import AsyncOpenAI
+
+        client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY", "").strip() or None)
+        request_kwargs: dict[str, Any] = {
+            "model": model,
+            "response_format": {"type": "json_object"},
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": score_prompt},
+            ],
+        }
+        temp_raw = os.getenv("OPENAI_SCORE_TEMPERATURE", "").strip()
+        if temp_raw:
+            try:
+                request_kwargs["temperature"] = float(temp_raw)
+            except ValueError:
+                pass
+        try:
+            response = await client.chat.completions.create(**request_kwargs)
+        except Exception as exc:
+            if "temperature" in request_kwargs and "temperature" in str(exc).lower():
+                request_kwargs.pop("temperature", None)
+                response = await client.chat.completions.create(**request_kwargs)
+            else:
+                raise
         content = (response.choices[0].message.content or "").strip()
         data = json.loads(content)
         score_rows = data.get("scores") if isinstance(data, dict) else None
         if not isinstance(score_rows, list) or not score_rows:
-            logger.warning("AI scorer returned no scores; keeping local ranking")
-            return matches
-
-        by_index: dict[int, dict[str, Any]] = {}
-        for item in score_rows:
-            if not isinstance(item, dict):
-                continue
-            try:
-                idx = int(item.get("index"))
-            except (TypeError, ValueError):
-                continue
-            by_index[idx] = item
-
-        if not by_index:
-            return matches
-
-        rescored: list[dict[str, Any]] = []
-        for i, row in enumerate(candidates):
-            out = dict(row)
-            ai = by_index.get(i)
-            if not ai:
-                rescored.append(out)
-                continue
-            try:
-                score = max(0.0, min(1.0, float(ai.get("score"))))
-            except (TypeError, ValueError):
-                rescored.append(out)
-                continue
-            tier = str(ai.get("chance_tier") or "").strip().lower()
-            if tier not in {"high", "medium", "low"}:
-                tier = _chance_tier(score)
-            reason = str(ai.get("reason") or "").strip()[:180]
-            out["score"] = round(score, 2)
-            out["chance_percent"] = int(round(score * 100))
-            out["chance_tier"] = tier
-            out["chance_label"] = _chance_label(tier)
-            if reason:
-                out["reason"] = reason
-            out["score_method"] = "ai"
-            rescored.append(out)
-
-        # Keep any leftover beyond AI batch (should be rare) with local scores.
-        if len(matches) > len(candidates):
-            rescored.extend(matches[len(candidates) :])
-
-        return _attach_display_fields(_rank_by_chance(rescored)[:12])
+            logger.warning("AI scorer returned no scores; using unscored order")
+            return _attach_display_fields(baseline[:12])
+        return _merge_score_rows(matches, candidates, score_rows)
     except Exception:
-        logger.exception("AI grant scoring failed; keeping local ranking")
-        return matches
+        logger.exception("AI grant scoring failed; using unscored order")
+        return _attach_display_fields(baseline[:12])
+
+
+def _apply_ai_scores(
+    matches: list[dict[str, Any]],
+    context: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Sync bridge for AI scoring."""
+    return _run_async(_apply_ai_scores_async(matches, context))
 
 
 def _finalize_ranked_matches(
     matches: list[dict[str, Any]],
-    profile: dict[str, Any],
+    context: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    """Local rank first, then AI score with priority when available."""
-    local = _attach_display_fields(_rank_by_chance(list(matches))[:12])
-    return _apply_ai_scores(local, profile)
+    """AI scoring only, against query/effective search criteria."""
+    return _apply_ai_scores(list(matches)[:18], context)
+
+
+async def _finalize_ranked_matches_async(
+    matches: list[dict[str, Any]],
+    context: dict[str, Any],
+) -> list[dict[str, Any]]:
+    return await _apply_ai_scores_async(list(matches)[:18], context)
 
 
 def _merge_source_details(
@@ -613,64 +820,65 @@ def fetch_both_sources(profile: Any) -> dict[str, list[dict[str, Any]]]:
     return fetch_all_sources(profile)
 
 
-def _source_jobs(profile: Any) -> dict[str, Any]:
-    """Build callable jobs for each grant source (used by parallel + streaming fetch)."""
+def _source_coroutines(
+    profile: Any,
+    user_query: str = "",
+    context: dict[str, Any] | None = None,
+) -> dict[str, Callable[[], Awaitable[list[dict[str, Any]]]]]:
+    """Build async source fetchers (asyncio.to_thread over sync HTTP clients)."""
     from services.granted_ai import search_grants
     from services.grants_gov import search_with_filters
     from services.usaspending import search_awards
 
-    payload = _profile_payload(profile)
-    keyword = payload["title"] or " ".join(payload["description"].split()[:8]) or "grant"
-    city = payload["location_city"]
-    state = payload["location_state"]
-    priority = payload["priority_area"]
-    org_type = payload["org_type"]
+    payload = context or _search_context(profile, user_query)
+    keyword = payload.get("keyword") or payload.get("title") or "grant"
+    city = payload.get("location_city") or ""
+    state = payload.get("location_state") or ""
+    priority = payload.get("priority_area") or ""
+    org_type = payload.get("org_type") or ""
 
-    def _gov():
+    async def _gov() -> list[dict[str, Any]]:
         try:
-            return _compact(
-                search_with_filters(
-                    keyword=keyword,
-                    priority_area=priority,
-                    location_city=city,
-                    location_state=state,
-                    rows=15,
-                ),
-                "grants_gov",
+            results = await asyncio.to_thread(
+                search_with_filters,
+                keyword=keyword,
+                priority_area=priority,
+                location_city=city,
+                location_state=state,
+                rows=15,
             )
+            return _compact(results, "grants_gov")
         except Exception:
             logger.warning("grants_gov fallback fetch failed", exc_info=True)
             return []
 
-    def _usa():
+    async def _usa() -> list[dict[str, Any]]:
         try:
-            return _compact(
-                search_awards(
-                    keyword=keyword,
-                    priority_area=priority,
-                    location_city=city,
-                    location_state=state,
-                    limit=10,
-                ),
-                "usaspending",
+            results = await asyncio.to_thread(
+                search_awards,
+                keyword=keyword,
+                priority_area=priority,
+                location_city=city,
+                location_state=state,
+                limit=10,
             )
+            return _compact(results, "usaspending")
         except Exception:
             logger.warning("usaspending fallback fetch failed", exc_info=True)
             return []
 
-    def _granted():
+    async def _granted() -> list[dict[str, Any]]:
         try:
-            return _compact(
-                search_grants(
-                    keyword=keyword,
-                    priority_area=priority,
-                    location_city=city,
-                    location_state=state,
-                    org_type=org_type,
-                    limit=10,
-                ),
-                "granted_ai",
+            results = await asyncio.to_thread(
+                search_grants,
+                keyword=keyword,
+                priority_area=priority,
+                location_city=city,
+                location_state=state,
+                org_type=org_type,
+                limit=10,
             )
+            return _compact(results, "granted_ai")
         except Exception:
             logger.warning("granted_ai fallback fetch failed", exc_info=True)
             return []
@@ -682,24 +890,45 @@ def _source_jobs(profile: Any) -> dict[str, Any]:
     }
 
 
-def fetch_all_sources(profile: Any) -> dict[str, list[dict[str, Any]]]:
-    """Call all source APIs in parallel."""
-    jobs = _source_jobs(profile)
-    with ThreadPoolExecutor(max_workers=3) as pool:
-        futures = {pool.submit(fn): name for name, fn in jobs.items()}
-        out: dict[str, list[dict[str, Any]]] = {
-            "grants_gov": [],
-            "usaspending": [],
-            "granted_ai": [],
-        }
-        for fut in as_completed(futures):
-            name = futures[fut]
-            try:
-                out[name] = fut.result()
-            except Exception:
-                logger.warning("%s fetch crashed", name, exc_info=True)
-                out[name] = []
-        return out
+# Backward-compatible alias used by older call sites / commands.
+_source_jobs = _source_coroutines
+
+
+async def fetch_all_sources_async(
+    profile: Any,
+    user_query: str = "",
+    context: dict[str, Any] | None = None,
+) -> dict[str, list[dict[str, Any]]]:
+    """Fetch all source APIs concurrently via asyncio.gather (no ThreadPoolExecutor)."""
+    jobs = _source_coroutines(profile, user_query=user_query, context=context)
+    names = list(jobs.keys())
+    results = await asyncio.gather(
+        *(jobs[name]() for name in names),
+        return_exceptions=True,
+    )
+    out: dict[str, list[dict[str, Any]]] = {
+        "grants_gov": [],
+        "usaspending": [],
+        "granted_ai": [],
+    }
+    for name, result in zip(names, results):
+        if isinstance(result, Exception):
+            logger.warning("%s fetch crashed: %s", name, result)
+            out[name] = []
+        else:
+            out[name] = result or []
+    return out
+
+
+def fetch_all_sources(
+    profile: Any,
+    user_query: str = "",
+    context: dict[str, Any] | None = None,
+) -> dict[str, list[dict[str, Any]]]:
+    """Sync bridge for concurrent multi-source fetch."""
+    return _run_async(
+        fetch_all_sources_async(profile, user_query=user_query, context=context)
+    )
 
 
 _SOURCE_LABELS = {
@@ -726,36 +955,110 @@ def _score_one_source(
     return scored[:5]
 
 
-def iter_grant_matching_events(profile: Any) -> Iterator[dict[str, Any]]:
-    """
-    Yield progressive match events for SSE streaming.
-    Fetches sources in parallel and emits results as each source finishes.
-    """
-    payload = _profile_payload(profile)
+def _status_override_note(payload: dict[str, Any]) -> str:
+    overrides = payload.get("overrides") or {}
+    if not overrides:
+        return " Using your saved profile defaults."
+    bits = []
+    if overrides.get("location_state") or overrides.get("location_city"):
+        place = ", ".join(
+            x
+            for x in (
+                payload.get("location_city") or "",
+                payload.get("location_state") or "",
+            )
+            if x
+        )
+        bits.append(place or "updated location")
+    if overrides.get("priority_area"):
+        bits.append(str(overrides["priority_area"]))
+    if overrides.get("keyword") or overrides.get("title"):
+        bits.append(str(payload.get("keyword") or overrides.get("title")))
+    return f" Using your request for {', '.join(bits)}." if bits else ""
+
+
+def _initial_status_event(payload: dict[str, Any], *, agent: bool) -> dict[str, Any]:
     location = {
         "city": payload.get("location_city") or "",
         "state": payload.get("location_state") or "",
     }
-    yield {
+    overrides = payload.get("overrides") or {}
+    if agent:
+        message = (
+            "Agent is querying Grants.gov, USASpending, and GrantedAI concurrently…"
+            + _status_override_note(payload)
+        )
+    else:
+        message = (
+            "Searching Grants.gov, USASpending, and GrantedAI concurrently…"
+            + _status_override_note(payload)
+        )
+    return {
         "type": "status",
-        "message": "Searching Grants.gov, USASpending, and GrantedAI in parallel…",
+        "message": message,
+        "location": location,
+        "search_context": {
+            "keyword": payload.get("keyword") or "",
+            "priority_area": payload.get("priority_area") or "",
+            "location_city": location["city"],
+            "location_state": location["state"],
+            "budget_requested": payload.get("budget_requested") or "",
+            "org_type": payload.get("org_type") or "",
+            "overrides": overrides,
+        },
+    }
+
+
+def _done_event(
+    final: list[dict[str, Any]],
+    location: dict[str, str],
+) -> dict[str, Any]:
+    high = sum(1 for m in final if m.get("chance_tier") == "high")
+    medium = sum(1 for m in final if m.get("chance_tier") == "medium")
+    if final:
+        done_message = (
+            f"Ranked {len(final)} opportunities with AI scoring "
+            f"({high} high, {medium} medium chance)."
+        )
+    else:
+        done_message = "No ranked matches yet for your project."
+    return {
+        "type": "done",
+        "message": done_message,
+        "matches": final,
+        "match_count": len(final),
         "location": location,
     }
 
-    jobs = _source_jobs(profile)
+
+async def _aiter_fallback_events(
+    profile: Any,
+    user_query: str,
+    payload: dict[str, Any],
+) -> AsyncIterator[dict[str, Any]]:
+    """Async gather fallback that preserves progressive SSE source events."""
+    location = {
+        "city": payload.get("location_city") or "",
+        "state": payload.get("location_state") or "",
+    }
+    yield _initial_status_event(payload, agent=False)
+
+    jobs = _source_coroutines(profile, user_query=user_query, context=payload)
     collected: dict[str, list[dict[str, Any]]] = {
         "grants_gov": [],
         "usaspending": [],
         "granted_ai": [],
     }
-
-    with ThreadPoolExecutor(max_workers=3) as pool:
-        futures = {pool.submit(fn): name for name, fn in jobs.items()}
-        for fut in as_completed(futures):
-            source = futures[fut]
+    tasks = {name: asyncio.create_task(fn()) for name, fn in jobs.items()}
+    name_by_task = {task: name for name, task in tasks.items()}
+    pending: set[asyncio.Task] = set(tasks.values())
+    while pending:
+        done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+        for task in done:
+            source = name_by_task[task]
             label = _SOURCE_LABELS.get(source, source)
             try:
-                rows = fut.result() or []
+                rows = task.result() or []
             except Exception:
                 logger.warning("%s stream fetch failed", source, exc_info=True)
                 rows = []
@@ -782,55 +1085,212 @@ def iter_grant_matching_events(profile: Any) -> Iterator[dict[str, Any]]:
         profile=payload,
         ai_priority=False,
     )
-    if final and _ai_scoring_enabled():
+    if final:
         yield {
             "type": "status",
-            "message": "Scoring matches with AI (topic, location, budget, eligibility)…",
+            "message": (
+                "Scoring matches with AI against your request"
+                + (
+                    f" ({payload.get('location_state') or 'your location'}"
+                    f", {payload.get('priority_area') or 'your topic'})…"
+                    if payload.get("user_query")
+                    else " (saved profile defaults)…"
+                )
+            ),
             "location": location,
         }
-        final = _finalize_ranked_matches(final, payload)
-    high = sum(1 for m in final if m.get("chance_tier") == "high")
-    medium = sum(1 for m in final if m.get("chance_tier") == "medium")
-    if final:
-        method = "AI" if any(m.get("score_method") == "ai" for m in final) else "local"
-        done_message = (
-            f"Ranked {len(final)} opportunities with {method} scoring "
-            f"({high} high, {medium} medium chance)."
+        final = await _finalize_ranked_matches_async(final, payload)
+    yield _done_event(final, location)
+
+
+async def _aiter_agent_events(
+    profile: Any,
+    user_query: str,
+    payload: dict[str, Any],
+) -> AsyncIterator[dict[str, Any]]:
+    """Primary path: Agents SDK streamed tool calls + scoring agent."""
+    from agents import Runner
+    from agents.items import ToolCallItem, ToolCallOutputItem
+    from agents.stream_events import RunItemStreamEvent
+
+    location = {
+        "city": payload.get("location_city") or "",
+        "state": payload.get("location_state") or "",
+    }
+    yield _initial_status_event(payload, agent=True)
+
+    agent = build_grant_agent(payload)
+    result = Runner.run_streamed(
+        agent,
+        _matching_prompt(payload, user_query),
+        max_turns=12,
+    )
+
+    collected: dict[str, list[dict[str, Any]]] = {
+        "grants_gov": [],
+        "usaspending": [],
+        "granted_ai": [],
+    }
+    call_map: dict[str, str] = {}
+    emitted_sources: set[str] = set()
+
+    async for event in result.stream_events():
+        if not isinstance(event, RunItemStreamEvent):
+            continue
+        if event.name == "tool_called" and isinstance(event.item, ToolCallItem):
+            tool_name = _tool_name_from_item(event.item, call_map)
+            call_id = getattr(event.item, "call_id", None)
+            if call_id and tool_name:
+                call_map[str(call_id)] = tool_name
+            label = _SOURCE_LABELS.get(tool_name, tool_name or "source")
+            yield {
+                "type": "status",
+                "message": f"Agent calling {label}…",
+                "location": location,
+            }
+            continue
+
+        if event.name != "tool_output" or not isinstance(event.item, ToolCallOutputItem):
+            continue
+
+        tool_name = _tool_name_from_item(event.item, call_map)
+        if tool_name not in collected:
+            rows_probe = _rows_from_tool_output(event.item.output)
+            if rows_probe:
+                tool_name = str(rows_probe[0].get("source") or tool_name)
+        if tool_name not in collected:
+            continue
+
+        rows = _rows_from_tool_output(event.item.output)
+        collected[tool_name] = rows
+        if tool_name in emitted_sources:
+            continue
+        emitted_sources.add(tool_name)
+        scored = _score_one_source(tool_name, rows, profile=payload)
+        label = _SOURCE_LABELS.get(tool_name, tool_name)
+        yield {
+            "type": "source",
+            "source": tool_name,
+            "label": label,
+            "message": (
+                f"Found {len(scored)} from {label}."
+                if scored
+                else f"No matches from {label}."
+            ),
+            "matches": scored,
+            "count": len(scored),
+            "location": location,
+        }
+
+    final_output = result.final_output
+    matches: list[dict[str, Any]] = []
+    if isinstance(final_output, GrantMatchResult):
+        matches = [m.model_dump() for m in final_output.matches]
+    elif isinstance(final_output, dict) and "matches" in final_output:
+        matches = list(final_output.get("matches") or [])
+
+    if not matches:
+        matches = _score_merge(
+            collected["grants_gov"],
+            collected["usaspending"],
+            collected["granted_ai"],
+            profile=payload,
+            ai_priority=False,
         )
     else:
-        done_message = "No ranked matches yet for your project."
-    yield {
-        "type": "done",
-        "message": done_message,
-        "matches": final,
-        "match_count": len(final),
-        "location": location,
-    }
+        used = {m.get("source") for m in matches}
+        needed = {"grants_gov", "usaspending", "granted_ai"}
+        if not needed.issubset(used):
+            sources = await fetch_all_sources_async(
+                profile, user_query=user_query, context=payload
+            )
+            matches = _merge_source_details(matches, sources)
+            extras: list[dict[str, Any]] = []
+            if sources["granted_ai"] and "granted_ai" not in used:
+                extras.extend(
+                    _score_merge(
+                        [], [], sources["granted_ai"], profile=payload, ai_priority=False
+                    )[:4]
+                )
+            if sources["usaspending"] and "usaspending" not in used:
+                extras.extend(
+                    _score_merge(
+                        [], sources["usaspending"], [], profile=payload, ai_priority=False
+                    )[:4]
+                )
+            if sources["grants_gov"] and "grants_gov" not in used:
+                extras.extend(
+                    _score_merge(
+                        sources["grants_gov"], [], [], profile=payload, ai_priority=False
+                    )[:4]
+                )
+            if extras:
+                matches.extend(extras)
+
+    if matches:
+        yield {
+            "type": "status",
+            "message": (
+                "Scoring matches with AI against your request"
+                + (
+                    f" ({payload.get('location_state') or 'your location'}"
+                    f", {payload.get('priority_area') or 'your topic'})…"
+                    if payload.get("user_query")
+                    else " (saved profile defaults)…"
+                )
+            ),
+            "location": location,
+        }
+        matches = await _finalize_ranked_matches_async(matches, payload)
+    yield _done_event(matches, location)
 
 
-def _score_source_rows(
+async def aiter_grant_matching_events(
+    profile: Any,
+    user_query: str = "",
+) -> AsyncIterator[dict[str, Any]]:
+    """
+    Async progressive match events for SSE.
+    Primary: Agents SDK streamed tool calls. Fallback: asyncio.gather sources.
+    """
+    payload = _search_context(profile, user_query)
+    if _agent_enabled():
+        try:
+            async for event in _aiter_agent_events(profile, user_query, payload):
+                yield event
+            return
+        except Exception:
+            logger.exception(
+                "Async Agents SDK stream failed; falling back to asyncio gather"
+            )
+
+    async for event in _aiter_fallback_events(profile, user_query, payload):
+        yield event
+
+
+def iter_grant_matching_events(
+    profile: Any,
+    user_query: str = "",
+) -> Iterator[dict[str, Any]]:
+    """Sync bridge for Django StreamingHttpResponse SSE."""
+    yield from _iter_async_generator(
+        aiter_grant_matching_events(profile, user_query=user_query)
+    )
+
+
+def _collect_source_rows(
     items: list[dict[str, Any]],
     *,
-    profile: dict[str, Any] | None = None,
     default_reason: str,
 ) -> list[dict[str, Any]]:
-    """
-    Score each tool row against the user profile (topic, location, budget, etc.).
-    Falls back to tool fit_score / source defaults only when profile is empty.
-    """
-    profile = profile or {}
-    scored: list[dict[str, Any]] = []
-    for idx, item in enumerate(items):
-        row = _score_grant_against_profile(item, profile, rank_index=idx)
-        # Prefer computed reason; keep tool match_reasons if we had nothing useful.
-        if not row.get("reason") or row["reason"] == "general relevance to your project filters":
-            tool_reason = row.get("match_reasons") or ""
-            if tool_reason:
-                row["reason"] = tool_reason
-            else:
-                row.setdefault("reason", default_reason)
-        scored.append(row)
-    return scored
+    """Collect tool rows without local relevance scoring."""
+    rows: list[dict[str, Any]] = []
+    for item in items:
+        row = dict(item)
+        row.setdefault("reason", row.get("match_reasons") or default_reason)
+        row.setdefault("amount", row.get("amount") or "")
+        rows.append(row)
+    return rows
 
 
 def _score_merge(
@@ -842,52 +1302,44 @@ def _score_merge(
     ai_priority: bool = True,
 ) -> list[dict[str, Any]]:
     """
-    Merge sources, score by profile relevance, put strongest chances first.
-    Local scoring always runs first; when ai_priority=True, AI scores overwrite.
-    `profile` may be a Profile model or a payload dict from `_profile_payload`.
+    Merge sources, then AI-score against query/effective search criteria.
+    No local string scoring. `profile` may be a model or search-context dict.
     """
     if profile is not None and not isinstance(profile, dict):
-        profile_payload = _profile_payload(profile)
+        context = _search_context(profile, "")
     else:
-        profile_payload = profile or {}
+        context = profile or {}
 
     merged: list[dict[str, Any]] = []
     merged.extend(
-        _score_source_rows(
+        _collect_source_rows(
             gov,
-            profile=profile_payload,
             default_reason="Open opportunity from Grants.gov matching your filters.",
         )
     )
     merged.extend(
-        _score_source_rows(
+        _collect_source_rows(
             usa,
-            profile=profile_payload,
             default_reason="USASpending award in/near your location matching your topic.",
         )
     )
     merged.extend(
-        _score_source_rows(
+        _collect_source_rows(
             granted or [],
-            profile=profile_payload,
             default_reason="GrantedAI opportunity matching your focus and location.",
         )
     )
-    local = _attach_display_fields(_rank_by_chance(merged)[:12])
+    merged = merged[:18]
     if ai_priority:
-        return _finalize_ranked_matches(local, profile_payload)
-    return local
+        return _finalize_ranked_matches(merged, context)
+    return _neutral_rows(merged)[:12]
 
 
-def build_grant_agent():
+def build_grant_agent(defaults: dict[str, Any] | None = None):
     """
     Create the agent with separate tools registered.
 
-    Tools:
-      - grants_gov
-      - usaspending
-      - granted_ai
-
+    Tools use profile/context defaults when args are omitted.
     System instructions are loaded from grant_agent_instructions.md.
     """
     from agents import Agent
@@ -898,63 +1350,54 @@ def build_grant_agent():
         build_usaspending_tool,
     )
 
+    tool_defaults = dict(defaults or {})
     return Agent(
         name="Grant Matching Agent",
         instructions=load_agent_instructions(),
         tools=[
-            build_grants_gov_tool(),
-            build_usaspending_tool(),
-            build_granted_ai_tool(),
+            build_grants_gov_tool(tool_defaults),
+            build_usaspending_tool(tool_defaults),
+            build_granted_ai_tool(tool_defaults),
         ],
         output_type=GrantMatchResult,
         model=os.getenv("OPENAI_MODEL", "gpt-5.5"),
     )
 
 
-def run_grant_matching_agent(profile: Any) -> list[dict[str, Any]]:
+async def run_grant_matching_agent_async(
+    profile: Any, user_query: str = ""
+) -> list[dict[str, Any]]:
     """
-    Fast path (default): parallel multi-source fetch + scored merge.
-    Optional agent path: set GRANT_USE_AGENT=1 (slower; multi-turn LLM).
+    Async matching: Agents SDK tools first, asyncio.gather fallback.
+    Profile defaults apply unless user_query overrides specific fields.
     """
-    payload = _profile_payload(profile)
+    payload = _search_context(profile, user_query)
 
-    def _fallback() -> list[dict[str, Any]]:
-        sources = fetch_all_sources(profile)
-        return _score_merge(
-            sources["grants_gov"],
-            sources["usaspending"],
-            sources["granted_ai"],
-            profile=payload,
-            ai_priority=True,
+    async def _fallback() -> list[dict[str, Any]]:
+        sources = await fetch_all_sources_async(
+            profile, user_query=user_query, context=payload
+        )
+        return await _finalize_ranked_matches_async(
+            _score_merge(
+                sources["grants_gov"],
+                sources["usaspending"],
+                sources["granted_ai"],
+                profile=payload,
+                ai_priority=False,
+            ),
+            payload,
         )
 
-    use_agent = os.getenv("GRANT_USE_AGENT", "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
-    if not use_agent:
-        return _fallback()
-
-    if not os.getenv("OPENAI_API_KEY", "").strip():
-        logger.warning("OPENAI_API_KEY missing; using direct merged fallback")
-        return _fallback()
-
-    prompt = (
-        "Run the matching flow for this user profile. "
-        "Call the source tools (prefer grants_gov, usaspending, and granted_ai), "
-        "keep the best grants, score them, and return structured matches. "
-        "Preserve agency name, agency_address, and other provider fields. "
-        "Set chance_percent to round(score * 100).\n\n"
-        f"USER_PROFILE_JSON:\n{json.dumps(payload, indent=2)}"
-    )
+    if not _agent_enabled():
+        return await _fallback()
 
     try:
         from agents import Runner
 
-        agent = build_grant_agent()
-        result = Runner.run_sync(agent, prompt, max_turns=12)
+        agent = build_grant_agent(payload)
+        result = await Runner.run(
+            agent, _matching_prompt(payload, user_query), max_turns=12
+        )
         final = result.final_output
 
         matches: list[dict[str, Any]] = []
@@ -964,16 +1407,17 @@ def run_grant_matching_agent(profile: Any) -> list[dict[str, Any]]:
             matches = list(final.get("matches") or [])
 
         if not matches:
-            logger.info("Agent returned no matches; using fallback merge")
-            return _fallback()
+            logger.info("Agent returned no matches; using async fallback merge")
+            return await _fallback()
 
         matches.sort(key=lambda m: float(m.get("score") or 0), reverse=True)
 
-        # If agent omitted a source, top up from a direct fetch of that source.
         used = {m.get("source") for m in matches}
         needed = {"grants_gov", "usaspending", "granted_ai"}
         if not needed.issubset(used):
-            sources = fetch_all_sources(profile)
+            sources = await fetch_all_sources_async(
+                profile, user_query=user_query, context=payload
+            )
             matches = _merge_source_details(matches, sources)
             extras: list[dict[str, Any]] = []
             if sources["granted_ai"] and "granted_ai" not in used:
@@ -998,12 +1442,12 @@ def run_grant_matching_agent(profile: Any) -> list[dict[str, Any]]:
                 matches.extend(extras)
                 matches.sort(key=lambda m: float(m.get("score") or 0), reverse=True)
 
-        # Local rescore first, then AI scores take priority when available.
-        rescored = [
-            _score_grant_against_profile(m, payload, rank_index=i)
-            for i, m in enumerate(matches)
-        ]
-        return _finalize_ranked_matches(rescored, payload)
+        return await _finalize_ranked_matches_async(matches, payload)
     except Exception:
-        logger.exception("Grant agent failed; using direct merged fallback")
-        return _fallback()
+        logger.exception("Grant agent failed; using async merged fallback")
+        return await _fallback()
+
+
+def run_grant_matching_agent(profile: Any, user_query: str = "") -> list[dict[str, Any]]:
+    """Sync bridge for /home/matches/ JSON endpoint."""
+    return _run_async(run_grant_matching_agent_async(profile, user_query=user_query))

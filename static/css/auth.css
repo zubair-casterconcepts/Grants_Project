@@ -341,6 +341,12 @@ html.is-page-loading body {
   animation: rise 700ms cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
+.settings-password + .settings-password {
+  margin-top: 2rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid var(--dash-line, #e0e4e0);
+}
+
 .settings-password-head h1,
 .settings-password-head h2 {
   margin: 0 0 0.35rem;

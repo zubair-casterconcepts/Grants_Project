@@ -1,4 +1,6 @@
 from django import forms
+from django.contrib.auth import password_validation
+from django.contrib.auth.forms import PasswordChangeForm as DjangoPasswordChangeForm
 
 from services.location_utils import US_STATE_NAMES, normalize_location
 
@@ -9,16 +11,75 @@ STATE_CHOICES = [("", "Select state")] + [
 ]
 
 
-class ProfileIntakeForm(forms.ModelForm):
-    """First-login onboarding + Settings update form (user/ntee set in code)."""
-
-    location_state = forms.ChoiceField(choices=STATE_CHOICES)
+class ProfileAccountForm(forms.ModelForm):
+    """Account/profile identity fields (not used for grant tool matching)."""
 
     class Meta:
         model = Profile
         fields = (
             "organization",
             "role_title",
+        )
+        widgets = {
+            "organization": forms.TextInput(attrs={"placeholder": "Organization name"}),
+            "role_title": forms.TextInput(attrs={"placeholder": "Your role"}),
+        }
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["organization"].required = True
+        self.fields["role_title"].required = False
+
+
+class PasswordUpdateForm(DjangoPasswordChangeForm):
+    """Change password: verify current, then set a validated new password."""
+
+    old_password = forms.CharField(
+        label="Current password",
+        strip=False,
+        widget=forms.PasswordInput(
+            attrs={
+                "autocomplete": "current-password",
+                "placeholder": "Enter your current password",
+            }
+        ),
+    )
+    new_password1 = forms.CharField(
+        label="New password",
+        strip=False,
+        widget=forms.PasswordInput(
+            attrs={
+                "autocomplete": "new-password",
+                "placeholder": "Enter a new password",
+            }
+        ),
+        help_text=password_validation.password_validators_help_text_html(),
+    )
+    new_password2 = forms.CharField(
+        label="Confirm new password",
+        strip=False,
+        widget=forms.PasswordInput(
+            attrs={
+                "autocomplete": "new-password",
+                "placeholder": "Re-enter the new password",
+            }
+        ),
+    )
+
+    def __init__(self, user, *args, **kwargs):
+        super().__init__(user, *args, **kwargs)
+        for name in ("old_password", "new_password1", "new_password2"):
+            self.fields[name].required = True
+
+
+class ProfileIntakeForm(forms.ModelForm):
+    """Settings form for project details used in grant matching."""
+
+    location_state = forms.ChoiceField(choices=STATE_CHOICES)
+
+    class Meta:
+        model = Profile
+        fields = (
             "title",
             "description",
             "priority_area",
@@ -29,8 +90,6 @@ class ProfileIntakeForm(forms.ModelForm):
             "eligibility_notes",
         )
         widgets = {
-            "organization": forms.TextInput(attrs={"placeholder": "Organization name"}),
-            "role_title": forms.TextInput(attrs={"placeholder": "Your role"}),
             "title": forms.TextInput(attrs={"placeholder": "What you seek funding for"}),
             "description": forms.Textarea(
                 attrs={"rows": 5, "placeholder": "Describe the work"}
@@ -47,7 +106,6 @@ class ProfileIntakeForm(forms.ModelForm):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         required = (
-            "organization",
             "title",
             "description",
             "priority_area",
