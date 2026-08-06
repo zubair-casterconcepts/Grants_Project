@@ -25,6 +25,7 @@ from typing import Any, Awaitable, Callable, TypeVar
 
 from pydantic import BaseModel, Field
 
+from services.async_utils import run_sync
 from services.query_context import resolve_search_context, scoring_criteria
 
 logger = logging.getLogger(__name__)
@@ -134,30 +135,8 @@ class GrantScoreResult(BaseModel):
 
 
 def _run_async(coro: Awaitable[T]) -> T:
-    """Run an async coroutine from sync Django code (no running loop expected)."""
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(coro)
-
-    # Nested event loop (tests / ASGI edge cases): isolate on a worker thread.
-    result: dict[str, T] = {}
-    error: dict[str, BaseException] = {}
-
-    def _target() -> None:
-        try:
-            result["value"] = asyncio.run(coro)
-        except BaseException as exc:  # noqa: BLE001 — re-raised below
-            error["exc"] = exc
-
-    import threading
-
-    thread = threading.Thread(target=_target, daemon=True)
-    thread.start()
-    thread.join()
-    if "exc" in error:
-        raise error["exc"]
-    return result["value"]
+    """Run an async coroutine from sync Django code."""
+    return run_sync(coro)
 
 
 def _iter_async_generator(agen: AsyncIterator[T]) -> Iterator[T]:
@@ -825,10 +804,10 @@ def _source_coroutines(
     user_query: str = "",
     context: dict[str, Any] | None = None,
 ) -> dict[str, Callable[[], Awaitable[list[dict[str, Any]]]]]:
-    """Build async source fetchers (asyncio.to_thread over sync HTTP clients)."""
-    from services.granted_ai import search_grants
-    from services.grants_gov import search_with_filters
-    from services.usaspending import search_awards
+    """Build async source fetchers (native async HTTP clients)."""
+    from services.granted_ai import search_grants_async
+    from services.grants_gov import search_with_filters_async
+    from services.usaspending import search_awards_async
 
     payload = context or _search_context(profile, user_query)
     keyword = payload.get("keyword") or payload.get("title") or "grant"
@@ -839,8 +818,7 @@ def _source_coroutines(
 
     async def _gov() -> list[dict[str, Any]]:
         try:
-            results = await asyncio.to_thread(
-                search_with_filters,
+            results = await search_with_filters_async(
                 keyword=keyword,
                 priority_area=priority,
                 location_city=city,
@@ -854,8 +832,7 @@ def _source_coroutines(
 
     async def _usa() -> list[dict[str, Any]]:
         try:
-            results = await asyncio.to_thread(
-                search_awards,
+            results = await search_awards_async(
                 keyword=keyword,
                 priority_area=priority,
                 location_city=city,
@@ -869,8 +846,7 @@ def _source_coroutines(
 
     async def _granted() -> list[dict[str, Any]]:
         try:
-            results = await asyncio.to_thread(
-                search_grants,
+            results = await search_grants_async(
                 keyword=keyword,
                 priority_area=priority,
                 location_city=city,

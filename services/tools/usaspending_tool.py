@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Any
 
@@ -16,7 +15,7 @@ def build_usaspending_tool(defaults: dict[str, Any] | None = None):
     """Construct the USASpending source tool. Blank args fall back to profile defaults."""
     from agents import function_tool
 
-    from services.usaspending import search_awards
+    from services.usaspending import search_awards_async
 
     tool_defaults = dict(defaults or {})
 
@@ -49,8 +48,7 @@ def build_usaspending_tool(defaults: dict[str, Any] | None = None):
             defaults=tool_defaults,
         )
         try:
-            results = await asyncio.to_thread(
-                search_awards,
+            results = await search_awards_async(
                 keyword=params["keyword"],
                 priority_area=params["priority_area"],
                 location_city=params["location_city"],

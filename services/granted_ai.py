@@ -1,12 +1,16 @@
-"""GrantedAI.com API client — discover + grants search (server-side only)."""
+"""GrantedAI.com API client — discover + grants search (async, server-side only)."""
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time
 from typing import Any
-import requests
+
+import httpx
+
+from services.async_utils import build_async_client, json_body, run_sync
 
 logger = logging.getLogger(__name__)
 
@@ -160,19 +164,27 @@ def _cache_key(**parts: Any) -> str:
     return "|".join(str(parts.get(k, "")).strip().lower() for k in sorted(parts))
 
 
-def _get_json(url: str, params: dict[str, Any]) -> dict[str, Any] | None:
-    """GET with soft retries. Never raises."""
+def _client() -> httpx.AsyncClient:
+    return build_async_client(
+        connect_timeout=CONNECT_TIMEOUT,
+        read_timeout=READ_TIMEOUT,
+        headers=_headers(),
+        max_connections=4,
+    )
+
+
+async def _get_json_async(
+    client: httpx.AsyncClient,
+    url: str,
+    params: dict[str, Any],
+) -> dict[str, Any] | None:
+    """GET with soft async retries. Never raises."""
     query = {k: v for k, v in params.items() if v not in (None, "")}
     last_error = ""
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
-            response = requests.get(
-                url,
-                params=query,
-                headers=_headers(),
-                timeout=(CONNECT_TIMEOUT, READ_TIMEOUT),
-            )
-        except (requests.Timeout, requests.ConnectionError) as exc:
+            response = await client.get(url, params=query)
+        except (httpx.TimeoutException, httpx.ConnectError) as exc:
             last_error = f"{type(exc).__name__}: {exc}"
             logger.warning(
                 "GrantedAI timeout/connect (attempt %s/%s): %s",
@@ -180,16 +192,15 @@ def _get_json(url: str, params: dict[str, Any]) -> dict[str, Any] | None:
                 MAX_ATTEMPTS,
                 last_error,
             )
-            time.sleep(0.5 * attempt)
+            await asyncio.sleep(0.5 * attempt)
             continue
-        except requests.RequestException as exc:
+        except httpx.HTTPError as exc:
             logger.warning("GrantedAI request failed: %s", exc)
             return None
 
         if response.status_code == 200:
-            try:
-                body = response.json()
-            except ValueError:
+            body = json_body(response)
+            if body is None:
                 logger.warning("GrantedAI returned invalid JSON")
                 return None
             if isinstance(body, dict) and body.get("error"):
@@ -203,7 +214,7 @@ def _get_json(url: str, params: dict[str, Any]) -> dict[str, Any] | None:
 
         if response.status_code in (500, 502, 503, 504):
             last_error = f"HTTP {response.status_code}"
-            time.sleep(0.5 * attempt)
+            await asyncio.sleep(0.5 * attempt)
             continue
 
         logger.warning(
@@ -233,7 +244,7 @@ def _build_query(keyword: str, priority_area: str = "") -> str:
     return query if len(query) >= 3 else (query or "grant funding")
 
 
-def search_grants(
+async def search_grants_async(
     *,
     keyword: str = "",
     priority_area: str = "",
@@ -242,9 +253,10 @@ def search_grants(
     org_type: str = "",
     limit: int = 10,
     use_discover: bool = True,
+    client: httpx.AsyncClient | None = None,
 ) -> list[dict[str, Any]]:
     """
-    Search GrantedAI for grants matching the user filters.
+    Search GrantedAI for grants matching the user filters (async).
 
     Prefers /discover (AI + DB blend). Falls back to /grants on failure or empty.
     Never raises.
@@ -270,41 +282,71 @@ def search_grants(
     if cached and (time.time() - cached[0]) < _CACHE_TTL_SECONDS:
         return list(cached[1])
 
-    results: list[dict[str, Any]] = []
+    async def _run(active: httpx.AsyncClient) -> list[dict[str, Any]]:
+        results: list[dict[str, Any]] = []
 
-    if use_discover:
-        discover_params = {
-            "q": query,
-            "state": location_state.upper() if location_state else "",
-            "org_type": mapped_org,
-            "limit": str(effective_limit),
-        }
-        body = _get_json(DISCOVER_URL, discover_params)
-        rows = (body or {}).get("data") if body else None
-        if isinstance(rows, list):
-            results = [
-                _normalize_grant(row, from_discover=True)
-                for row in rows
-                if isinstance(row, dict)
-            ][:effective_limit]
+        if use_discover:
+            discover_params = {
+                "q": query,
+                "state": location_state.upper() if location_state else "",
+                "org_type": mapped_org,
+                "limit": str(effective_limit),
+            }
+            body = await _get_json_async(active, DISCOVER_URL, discover_params)
+            rows = (body or {}).get("data") if body else None
+            if isinstance(rows, list):
+                results = [
+                    _normalize_grant(row, from_discover=True)
+                    for row in rows
+                    if isinstance(row, dict)
+                ][:effective_limit]
 
-    if not results:
-        grants_params = {
-            "q": query,
-            "status": "active",
-            "state": location_state.upper() if location_state else "",
-            "limit": str(effective_limit),
-            "sort": "relevance",
-        }
-        body = _get_json(GRANTS_URL, grants_params)
-        rows = (body or {}).get("data") if body else None
-        if isinstance(rows, list):
-            results = [
-                _normalize_grant(row, from_discover=False)
-                for row in rows
-                if isinstance(row, dict)
-            ][:effective_limit]
+        if not results:
+            grants_params = {
+                "q": query,
+                "status": "active",
+                "state": location_state.upper() if location_state else "",
+                "limit": str(effective_limit),
+                "sort": "relevance",
+            }
+            body = await _get_json_async(active, GRANTS_URL, grants_params)
+            rows = (body or {}).get("data") if body else None
+            if isinstance(rows, list):
+                results = [
+                    _normalize_grant(row, from_discover=False)
+                    for row in rows
+                    if isinstance(row, dict)
+                ][:effective_limit]
 
-    if results:
-        _CACHE[key] = (time.time(), results)
-    return results
+        if results:
+            _CACHE[key] = (time.time(), results)
+        return results
+
+    if client is not None:
+        return await _run(client)
+    async with _client() as owned:
+        return await _run(owned)
+
+
+def search_grants(
+    *,
+    keyword: str = "",
+    priority_area: str = "",
+    location_city: str = "",
+    location_state: str = "",
+    org_type: str = "",
+    limit: int = 10,
+    use_discover: bool = True,
+) -> list[dict[str, Any]]:
+    """Sync bridge for search_grants_async()."""
+    return run_sync(
+        search_grants_async(
+            keyword=keyword,
+            priority_area=priority_area,
+            location_city=location_city,
+            location_state=location_state,
+            org_type=org_type,
+            limit=limit,
+            use_discover=use_discover,
+        )
+    )

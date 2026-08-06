@@ -108,14 +108,25 @@ def profile_defaults(profile: Any) -> dict[str, Any]:
     }
 
 
+# State codes that are also common English words ("grants in NY" must not read
+# the word "in" as Indiana). These only count when written in uppercase.
+_WORD_LIKE_STATE_ABBRS = frozenset({"IN", "OR", "ME", "OK", "HI", "LA", "DE"})
+
+
 def _parse_state(text: str) -> str:
     lowered = f" {text.lower()} "
     # Full state names first (longer matches like "new york").
     for abbr, name in sorted(US_STATE_NAMES.items(), key=lambda x: -len(x[1])):
         if f" {name.lower()} " in lowered or f" in {name.lower()}" in lowered:
             return abbr
-    # Explicit "in CA" / ", TX" / standalone code.
+    # Uppercase codes as typed: "in CA", ", TX", standalone "NY".
     for abbr in US_STATE_NAMES:
+        if re.search(rf"\b{abbr}\b", text):
+            return abbr
+    # Lowercase codes ("grants in ny"), minus the word-like ones.
+    for abbr in US_STATE_NAMES:
+        if abbr in _WORD_LIKE_STATE_ABBRS:
+            continue
         if re.search(rf"\b{abbr}\b", text, re.I):
             return abbr
     return ""

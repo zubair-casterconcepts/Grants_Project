@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Any
 
@@ -16,7 +15,7 @@ def build_granted_ai_tool(defaults: dict[str, Any] | None = None):
     """Construct the GrantedAI source tool. Blank args fall back to profile defaults."""
     from agents import function_tool
 
-    from services.granted_ai import search_grants
+    from services.granted_ai import search_grants_async
 
     tool_defaults = dict(defaults or {})
 
@@ -52,8 +51,7 @@ def build_granted_ai_tool(defaults: dict[str, Any] | None = None):
             defaults=tool_defaults,
         )
         try:
-            results = await asyncio.to_thread(
-                search_grants,
+            results = await search_grants_async(
                 keyword=params["keyword"],
                 priority_area=params["priority_area"],
                 location_city=params["location_city"],

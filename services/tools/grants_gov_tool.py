@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Any
 
@@ -16,7 +15,7 @@ def build_grants_gov_tool(defaults: dict[str, Any] | None = None):
     """Construct the Grants.gov source tool. Blank args fall back to profile defaults."""
     from agents import function_tool
 
-    from services.grants_gov import search_with_filters
+    from services.grants_gov import search_with_filters_async
 
     tool_defaults = dict(defaults or {})
 
@@ -50,8 +49,7 @@ def build_grants_gov_tool(defaults: dict[str, Any] | None = None):
             defaults=tool_defaults,
         )
         try:
-            results = await asyncio.to_thread(
-                search_with_filters,
+            results = await search_with_filters_async(
                 keyword=params["keyword"],
                 priority_area=params["priority_area"],
                 location_city=params["location_city"],

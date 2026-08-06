@@ -1,15 +1,16 @@
-"""USASpending.gov API client (no auth required) — resilient to flaky networks."""
+"""USASpending.gov API client (no auth) — async httpx, resilient to flaky networks."""
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from typing import Any
 from urllib.parse import quote
 
-import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
+import httpx
+
+from services.async_utils import build_async_client, json_body, run_sync
 
 logger = logging.getLogger(__name__)
 
@@ -47,28 +48,15 @@ _CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 _CACHE_TTL_SECONDS = 300
 
 
-def _session() -> requests.Session:
-    session = requests.Session()
-    retry = Retry(
-        total=2,
-        connect=2,
-        read=2,
-        backoff_factor=0.8,
-        status_forcelist=(429, 500, 502, 503, 504),
-        allowed_methods=frozenset({"GET", "POST"}),
-        raise_on_status=False,
+def _client() -> httpx.AsyncClient:
+    """Async client with connection-level retries; status retries handled below."""
+    return build_async_client(
+        connect_timeout=CONNECT_TIMEOUT,
+        read_timeout=READ_TIMEOUT,
+        headers={"Content-Type": "application/json"},
+        retries=2,
+        max_connections=4,
     )
-    adapter = HTTPAdapter(max_retries=retry, pool_connections=4, pool_maxsize=4)
-    session.mount("https://", adapter)
-    session.mount("http://", adapter)
-    session.headers.update(
-        {
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "User-Agent": "GrantsMatcher/1.0",
-        }
-    )
-    return session
 
 
 def _build_keywords(
@@ -219,17 +207,16 @@ def _cache_key(
     )
 
 
-def _post_with_retries(session: requests.Session, payload: dict[str, Any]) -> dict[str, Any] | None:
-    """POST with soft retries. Never raises — returns JSON body or None."""
+async def _post_with_retries_async(
+    client: httpx.AsyncClient,
+    payload: dict[str, Any],
+) -> dict[str, Any] | None:
+    """POST with soft async retries. Never raises — returns JSON body or None."""
     last_error = ""
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
-            response = session.post(
-                SPENDING_BY_AWARD_URL,
-                json=payload,
-                timeout=(CONNECT_TIMEOUT, READ_TIMEOUT),
-            )
-        except (requests.Timeout, requests.ConnectionError) as exc:
+            response = await client.post(SPENDING_BY_AWARD_URL, json=payload)
+        except (httpx.TimeoutException, httpx.ConnectError) as exc:
             last_error = f"{type(exc).__name__}: {exc}"
             logger.warning(
                 "USASpending timeout/connect (attempt %s/%s): %s",
@@ -237,19 +224,18 @@ def _post_with_retries(session: requests.Session, payload: dict[str, Any]) -> di
                 MAX_ATTEMPTS,
                 last_error,
             )
-            time.sleep(0.6 * attempt)
+            await asyncio.sleep(0.6 * attempt)
             continue
-        except requests.RequestException as exc:
+        except httpx.HTTPError as exc:
             last_error = f"{type(exc).__name__}: {exc}"
             logger.warning("USASpending request failed: %s", last_error)
             return None
 
         if response.status_code == 200:
-            try:
-                return response.json()
-            except ValueError:
+            body = json_body(response)
+            if body is None:
                 logger.warning("USASpending returned invalid JSON")
-                return None
+            return body
 
         # Retry only on transient statuses.
         if response.status_code in (429, 500, 502, 503, 504):
@@ -260,7 +246,7 @@ def _post_with_retries(session: requests.Session, payload: dict[str, Any]) -> di
                 attempt,
                 MAX_ATTEMPTS,
             )
-            time.sleep(0.6 * attempt)
+            await asyncio.sleep(0.6 * attempt)
             continue
 
         logger.warning(
@@ -358,16 +344,17 @@ def _build_payloads(
     return payloads
 
 
-def search_awards(
+async def search_awards_async(
     *,
     keyword: str = "",
     priority_area: str = "",
     location_city: str = "",
     location_state: str = "",
     limit: int = 10,
+    client: httpx.AsyncClient | None = None,
 ) -> list[dict[str, Any]]:
     """
-    Search USASpending awards by keyword + user location.
+    Search USASpending awards by keyword + user location (async).
 
     Never raises. On network/SSL timeouts returns [] so the agent/dashboard
     can continue with Grants.gov results alone.
@@ -383,22 +370,49 @@ def search_awards(
     location_city, location_state = normalize_location(location_city, location_state)
     keywords = _build_keywords(keyword, priority_area, location_city)
     locations = _location_filters(location_state)
-    session = _session()
-
-    for payload in _build_payloads(
+    payloads = _build_payloads(
         keywords=keywords,
         locations=locations,
         limit=effective_limit,
-    ):
-        body = _post_with_retries(session, payload)
-        if not body:
-            continue
-        rows = body.get("results") or []
-        if not isinstance(rows, list) or not rows:
-            continue
-        results = [_normalize_award(row) for row in rows if isinstance(row, dict)][:10]
-        if results:
-            _CACHE[key] = (time.time(), results)
-            return results
+    )
 
-    return []
+    async def _run(active: httpx.AsyncClient) -> list[dict[str, Any]]:
+        for payload in payloads:
+            body = await _post_with_retries_async(active, payload)
+            if not body:
+                continue
+            rows = body.get("results") or []
+            if not isinstance(rows, list) or not rows:
+                continue
+            results = [
+                _normalize_award(row) for row in rows if isinstance(row, dict)
+            ][:10]
+            if results:
+                _CACHE[key] = (time.time(), results)
+                return results
+        return []
+
+    if client is not None:
+        return await _run(client)
+    async with _client() as owned:
+        return await _run(owned)
+
+
+def search_awards(
+    *,
+    keyword: str = "",
+    priority_area: str = "",
+    location_city: str = "",
+    location_state: str = "",
+    limit: int = 10,
+) -> list[dict[str, Any]]:
+    """Sync bridge for search_awards_async()."""
+    return run_sync(
+        search_awards_async(
+            keyword=keyword,
+            priority_area=priority_area,
+            location_city=location_city,
+            location_state=location_state,
+            limit=limit,
+        )
+    )

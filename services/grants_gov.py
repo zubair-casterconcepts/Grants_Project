@@ -1,13 +1,16 @@
-"""Grants.gov search2 client (no API key required)."""
+"""Grants.gov search2 client (no API key required) — async httpx I/O."""
 
 from __future__ import annotations
 
+import asyncio
 import html
 import logging
 import re
 from typing import Any
 
-import requests
+import httpx
+
+from services.async_utils import build_async_client, json_body, run_sync
 
 logger = logging.getLogger(__name__)
 
@@ -15,6 +18,8 @@ SEARCH2_URL = "https://api.grants.gov/v1/api/search2"
 FETCH_OPPORTUNITY_URL = "https://api.grants.gov/v1/api/fetchOpportunity"
 REQUEST_TIMEOUT_SECONDS = 30
 DETAIL_TIMEOUT_SECONDS = 12
+CONNECT_TIMEOUT_SECONDS = 8
+# Max concurrent detail lookups during enrichment.
 DETAIL_WORKERS = 6
 
 # Only map known priority areas — never guess.
@@ -322,19 +327,29 @@ def _normalize_hit(hit: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def fetch_opportunity_detail(opportunity_id: str | int) -> dict[str, Any]:
+async def fetch_opportunity_detail_async(
+    client: httpx.AsyncClient,
+    opportunity_id: str | int,
+) -> dict[str, Any]:
     """Fetch full Grants.gov opportunity details. Never raises."""
     if not opportunity_id:
         return {}
     try:
-        payload_id: Any = int(opportunity_id) if str(opportunity_id).isdigit() else opportunity_id
-        response = requests.post(
+        payload_id: Any = (
+            int(opportunity_id) if str(opportunity_id).isdigit() else opportunity_id
+        )
+        response = await client.post(
             FETCH_OPPORTUNITY_URL,
             json={"opportunityId": payload_id},
             headers={"Content-Type": "application/json"},
-            timeout=DETAIL_TIMEOUT_SECONDS,
+            timeout=httpx.Timeout(
+                connect=CONNECT_TIMEOUT_SECONDS,
+                read=DETAIL_TIMEOUT_SECONDS,
+                write=DETAIL_TIMEOUT_SECONDS,
+                pool=CONNECT_TIMEOUT_SECONDS,
+            ),
         )
-    except requests.RequestException:
+    except httpx.HTTPError:
         logger.warning("Grants.gov fetchOpportunity network error for %s", opportunity_id)
         return {}
 
@@ -346,13 +361,22 @@ def fetch_opportunity_detail(opportunity_id: str | int) -> dict[str, Any]:
         )
         return {}
 
-    try:
-        body = response.json()
-    except ValueError:
+    body = json_body(response)
+    if not isinstance(body, dict):
         return {}
 
     data = body.get("data")
     return data if isinstance(data, dict) else {}
+
+
+async def _fetch_detail_standalone(opportunity_id: str | int) -> dict[str, Any]:
+    async with _search_client() as client:
+        return await fetch_opportunity_detail_async(client, opportunity_id)
+
+
+def fetch_opportunity_detail(opportunity_id: str | int) -> dict[str, Any]:
+    """Sync bridge for fetch_opportunity_detail_async()."""
+    return run_sync(_fetch_detail_standalone(opportunity_id))
 
 
 def _detail_body(detail: dict[str, Any]) -> dict[str, Any]:
@@ -459,12 +483,13 @@ def _enrich_from_detail(base: dict[str, Any], detail: dict[str, Any]) -> dict[st
     return row
 
 
-def _enrich_hits(normalized: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Attach full opportunity details when available; never fail the search."""
+async def _enrich_hits_async(
+    client: httpx.AsyncClient,
+    normalized: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Attach full opportunity details concurrently; never fail the search."""
     if not normalized:
         return normalized
-
-    from concurrent.futures import ThreadPoolExecutor, as_completed
 
     enriched = list(normalized)
     index_by_id = {
@@ -475,34 +500,39 @@ def _enrich_hits(normalized: list[dict[str, Any]]) -> list[dict[str, Any]]:
     if not index_by_id:
         return enriched
 
-    with ThreadPoolExecutor(max_workers=min(DETAIL_WORKERS, len(index_by_id))) as pool:
-        futures = {
-            pool.submit(fetch_opportunity_detail, opp_id): opp_id
-            for opp_id in index_by_id
-        }
-        for future in as_completed(futures):
-            opp_id = futures[future]
-            try:
-                detail = future.result()
-            except Exception:
-                logger.warning("Grants.gov detail enrich failed for %s", opp_id, exc_info=True)
-                continue
-            idx = index_by_id.get(str(opp_id))
-            if idx is None:
-                continue
-            enriched[idx] = _enrich_from_detail(enriched[idx], detail)
+    semaphore = asyncio.Semaphore(min(DETAIL_WORKERS, len(index_by_id)))
+
+    async def _detail(opp_id: str) -> tuple[str, dict[str, Any]]:
+        async with semaphore:
+            return opp_id, await fetch_opportunity_detail_async(client, opp_id)
+
+    results = await asyncio.gather(
+        *(_detail(opp_id) for opp_id in index_by_id),
+        return_exceptions=True,
+    )
+    for result in results:
+        if isinstance(result, BaseException):
+            logger.warning("Grants.gov detail enrich failed: %s", result)
+            continue
+        opp_id, detail = result
+        idx = index_by_id.get(str(opp_id))
+        if idx is None or not detail:
+            continue
+        enriched[idx] = _enrich_from_detail(enriched[idx], detail)
     return enriched
 
 
-def _post_search2(payload: dict[str, Any]) -> list[dict[str, Any]]:
+async def _post_search2_async(
+    client: httpx.AsyncClient,
+    payload: dict[str, Any],
+) -> list[dict[str, Any]]:
     try:
-        response = requests.post(
+        response = await client.post(
             SEARCH2_URL,
             json=payload,
             headers={"Content-Type": "application/json"},
-            timeout=REQUEST_TIMEOUT_SECONDS,
         )
-    except requests.RequestException:
+    except httpx.HTTPError:
         logger.exception("Grants.gov search2 network error")
         return []
 
@@ -514,10 +544,9 @@ def _post_search2(payload: dict[str, Any]) -> list[dict[str, Any]]:
         )
         return []
 
-    try:
-        body = response.json()
-    except ValueError:
-        logger.exception("Grants.gov search2 returned invalid JSON")
+    body = json_body(response)
+    if not isinstance(body, dict):
+        logger.error("Grants.gov search2 returned invalid JSON")
         return []
 
     data = body.get("data") or {}
@@ -529,20 +558,24 @@ def _post_search2(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return [hit for hit in hits if isinstance(hit, dict)]
 
 
-def search_with_filters(
-    *,
-    keyword: str = "",
-    priority_area: str = "",
-    location_city: str = "",
-    location_state: str = "",
-    rows: int = 25,
-) -> list[dict[str, Any]]:
-    """
-    Fetch Grants.gov opportunities with explicit filters.
+def _search_client() -> httpx.AsyncClient:
+    return build_async_client(
+        connect_timeout=CONNECT_TIMEOUT_SECONDS,
+        read_timeout=REQUEST_TIMEOUT_SECONDS,
+        headers={"Content-Type": "application/json"},
+        max_connections=DETAIL_WORKERS + 2,
+    )
 
-    Cleans/normalizes hits and applies location filters. Used by the AI agent tool
-    and by search_opportunities().
-    """
+
+def _build_search_request(
+    *,
+    keyword: str,
+    priority_area: str,
+    location_city: str,
+    location_state: str,
+    rows: int,
+) -> tuple[dict[str, Any], Any, list[str]]:
+    """Build the search2 payload plus the subject/location terms used for filtering."""
     from types import SimpleNamespace
 
     from services.location_utils import normalize_location
@@ -575,18 +608,87 @@ def search_with_filters(
     if funding_category:
         payload["fundingCategories"] = funding_category
 
-    hits = _post_search2(payload)
+    return payload, subject, location_terms
 
-    # If focus+location is too narrow, retry with location + category.
-    if not hits and location_terms:
-        retry = dict(payload)
-        retry["keyword"] = " ".join(location_terms)
-        hits = _post_search2(retry)
 
-    hits = _filter_by_location(hits, subject)
-    normalized = [_normalize_hit(hit) for hit in hits][:10]
-    # Soft-enrich with full opportunity details (agency contact/address, awards, etc.).
-    return _enrich_hits(normalized)
+async def search_with_filters_async(
+    *,
+    keyword: str = "",
+    priority_area: str = "",
+    location_city: str = "",
+    location_state: str = "",
+    rows: int = 25,
+    client: httpx.AsyncClient | None = None,
+) -> list[dict[str, Any]]:
+    """
+    Fetch Grants.gov opportunities with explicit filters (async).
+
+    Cleans/normalizes hits and applies location filters. Used by the AI agent tool
+    and by search_opportunities().
+    """
+    payload, subject, location_terms = _build_search_request(
+        keyword=keyword,
+        priority_area=priority_area,
+        location_city=location_city,
+        location_state=location_state,
+        rows=rows,
+    )
+
+    async def _run(active: httpx.AsyncClient) -> list[dict[str, Any]]:
+        hits = await _post_search2_async(active, payload)
+
+        # If focus+location is too narrow, retry with location + category.
+        if not hits and location_terms:
+            retry = dict(payload)
+            retry["keyword"] = " ".join(location_terms)
+            hits = await _post_search2_async(active, retry)
+
+        filtered = _filter_by_location(hits, subject)
+        normalized = [_normalize_hit(hit) for hit in filtered][:10]
+        # Soft-enrich with full details (agency contact/address, awards, etc.).
+        return await _enrich_hits_async(active, normalized)
+
+    if client is not None:
+        return await _run(client)
+    async with _search_client() as owned:
+        return await _run(owned)
+
+
+def search_with_filters(
+    *,
+    keyword: str = "",
+    priority_area: str = "",
+    location_city: str = "",
+    location_state: str = "",
+    rows: int = 25,
+) -> list[dict[str, Any]]:
+    """Sync bridge for search_with_filters_async()."""
+    return run_sync(
+        search_with_filters_async(
+            keyword=keyword,
+            priority_area=priority_area,
+            location_city=location_city,
+            location_state=location_state,
+            rows=rows,
+        )
+    )
+
+
+def _opportunity_search_args(project: Any) -> dict[str, Any]:
+    title = (getattr(project, "title", None) or "").strip()
+    description = (getattr(project, "description", None) or "").strip()
+    return {
+        "keyword": title or " ".join(description.split()[:8]),
+        "priority_area": (getattr(project, "priority_area", None) or ""),
+        "location_city": (getattr(project, "location_city", None) or ""),
+        "location_state": (getattr(project, "location_state", None) or ""),
+        "rows": 25,
+    }
+
+
+async def search_opportunities_async(project: Any) -> list[dict[str, Any]]:
+    """Async search for a project/profile-like object."""
+    return await search_with_filters_async(**_opportunity_search_args(project))
 
 
 def search_opportunities(project: Any) -> list[dict[str, Any]]:
@@ -595,13 +697,4 @@ def search_opportunities(project: Any) -> list[dict[str, Any]]:
 
     Uses: title/description, priority_area (category), location_city/state.
     """
-    title = (getattr(project, "title", None) or "").strip()
-    description = (getattr(project, "description", None) or "").strip()
-    keyword = title or " ".join(description.split()[:8])
-    return search_with_filters(
-        keyword=keyword,
-        priority_area=(getattr(project, "priority_area", None) or ""),
-        location_city=(getattr(project, "location_city", None) or ""),
-        location_state=(getattr(project, "location_state", None) or ""),
-        rows=25,
-    )
+    return search_with_filters(**_opportunity_search_args(project))
