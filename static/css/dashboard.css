@@ -976,3 +976,170 @@ body {
     transform: none;
   }
 }
+
+/* ——— Chat instructions (starter prompt) manager ——— */
+.prompts-shell {
+  width: min(880px, calc(100% - 2rem));
+}
+
+.prompt-list {
+  display: grid;
+  gap: 1rem;
+  margin-top: 1.35rem;
+}
+
+.prompt-card {
+  background: var(--dash-card);
+  border: 1px solid var(--dash-line);
+  border-radius: 14px;
+  padding: 1.1rem 1.2rem 1.2rem;
+  box-shadow: 0 1px 0 rgba(28, 28, 26, 0.02);
+}
+
+.prompt-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.9rem;
+}
+
+.prompt-card-heading {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.prompt-card-heading strong {
+  font-family: var(--font-display);
+  font-size: 1.02rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--dash-ink);
+}
+
+.prompt-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.14rem 0.5rem;
+  border-radius: 999px;
+  border: 1px solid var(--dash-line);
+  background: var(--dash-tan-soft);
+  color: #6a5530;
+  font-size: 0.66rem;
+  font-weight: 650;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.prompt-badge.is-off {
+  background: #f4f4f4;
+  color: #7a776e;
+}
+
+.prompt-delete {
+  font: inherit;
+  cursor: pointer;
+  flex-shrink: 0;
+  border: 1px solid var(--dash-line);
+  background: var(--dash-card);
+  color: #9a3f2f;
+  border-radius: 999px;
+  padding: 0.4rem 0.85rem;
+  font-size: 0.84rem;
+  font-weight: 600;
+  transition: border-color 150ms ease, background 150ms ease;
+}
+
+.prompt-delete:hover {
+  border-color: rgba(196, 91, 74, 0.4);
+  background: rgba(196, 91, 74, 0.06);
+}
+
+.prompt-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.85rem 1rem;
+}
+
+.prompt-col-2 {
+  grid-column: 1 / -1;
+}
+
+.prompt-grid .field span small {
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 500;
+  color: #9c988e;
+}
+
+.field-check {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.field-check input[type="checkbox"] {
+  width: 1.05rem;
+  height: 1.05rem;
+  accent-color: var(--dash-green);
+  cursor: pointer;
+}
+
+.field-check span {
+  font-size: 0.92rem;
+  color: var(--dash-ink);
+  font-weight: 500;
+}
+
+.prompt-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 1rem;
+}
+
+.prompt-actions .btn-primary {
+  margin-top: 0;
+  padding: 0.7rem 1.2rem;
+}
+
+.prompt-form-errors {
+  margin-bottom: 0.85rem;
+}
+
+.prompt-empty {
+  margin: 1.35rem 0 0;
+  padding: 1.1rem 1.2rem;
+  border: 1px dashed var(--dash-line);
+  border-radius: 14px;
+  color: var(--dash-muted);
+  background: var(--dash-card);
+  line-height: 1.55;
+}
+
+.prompt-add {
+  margin-top: 1.85rem;
+}
+
+.prompt-add-title {
+  margin: 0 0 0.35rem;
+  font-family: var(--font-display);
+  font-size: 1.25rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--dash-ink);
+}
+
+.prompt-add .app-form {
+  margin-top: 0.75rem;
+}
+
+@media (max-width: 640px) {
+  .prompt-grid {
+    grid-template-columns: 1fr;
+  }
+}

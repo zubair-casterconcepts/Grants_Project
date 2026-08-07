@@ -1,0 +1,41 @@
+{% if form.non_field_errors %}
+  <ul class="dash-messages prompt-form-errors">
+    {% for error in form.non_field_errors %}<li class="error">{{ error }}</li>{% endfor %}
+  </ul>
+{% endif %}
+<div class="prompt-grid">
+  <label class="field prompt-col-2">
+    <span>Title</span>
+    {{ form.title }}
+    {% if form.title.errors %}<small class="field-error">{{ form.title.errors|striptags }}</small>{% endif %}
+  </label>
+
+  <label class="field prompt-col-2">
+    <span>Subtitle</span>
+    {{ form.description }}
+    {% if form.description.errors %}<small class="field-error">{{ form.description.errors|striptags }}</small>{% endif %}
+  </label>
+
+  <label class="field prompt-col-2">
+    <span>Search query <small>— sent to the grant matcher with the saved profile</small></span>
+    {{ form.query }}
+    {% if form.query.errors %}<small class="field-error">{{ form.query.errors|striptags }}</small>{% endif %}
+  </label>
+
+  <label class="field">
+    <span>Order</span>
+    {{ form.position }}
+    {% if form.position.errors %}<small class="field-error">{{ form.position.errors|striptags }}</small>{% endif %}
+  </label>
+
+  <label class="field">
+    <span>Key <small>— optional, auto-filled</small></span>
+    {{ form.key }}
+    {% if form.key.errors %}<small class="field-error">{{ form.key.errors|striptags }}</small>{% endif %}
+  </label>
+
+  <label class="field-check">
+    {{ form.is_active }}
+    <span>Show this card in chat</span>
+  </label>
+</div>

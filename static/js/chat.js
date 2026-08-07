@@ -608,6 +608,30 @@
     app.classList.remove("is-starter");
   }
 
+  // Fallback used only if the server didn't send starter_prompts (e.g. an old
+  // cached page). Mirrors _DEFAULT_STARTER_PROMPTS in the backend.
+  const DEFAULT_STARTER_PROMPTS = [
+    { title: "Find grants", description: "Search by focus & location", action: "search", query: "find grants", href: "" },
+    { title: "Update my project", description: "Refresh intake details", action: "update_project", query: "", href: "" },
+    { title: "View saved", description: "Open grants you saved", action: "link", query: "", href: "/accounts/saved/" },
+    { title: "Ask anything", description: "Type a question below", action: "focus_input", query: "", href: "" },
+  ];
+
+  // The onboarded starter cards come from the DB (bootstrap.starter_prompts).
+  function starterCardsForReady() {
+    const prompts = Array.isArray(bootstrap.starter_prompts)
+      ? bootstrap.starter_prompts
+      : [];
+    const source = prompts.length ? prompts : DEFAULT_STARTER_PROMPTS;
+    return source.map((p) => ({
+      title: p.title || "",
+      description: p.description || "",
+      action: p.action || "search",
+      query: p.query || "",
+      href: p.href || "",
+    }));
+  }
+
   function showStarter() {
     if (!starterEl || !starterGridEl) return;
     const onboarded = !!bootstrap.onboarding_completed;
@@ -626,64 +650,28 @@
     }
 
     const cards = onboarded
-      ? [
-          {
-            title: "Find grants",
-            description: "Search by focus & location",
-            value: "find grants",
-            tone: "forest",
-            icon: `<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="11" cy="11" r="6.25" stroke="currentColor" stroke-width="1.7"/><path d="m16.2 16.2 3.3 3.3" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>`,
-          },
-          {
-            title: "Update my project",
-            description: "Refresh intake details",
-            value: "update my project",
-            tone: "sage",
-            icon: `<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M14.2 5.8 18.2 9.8M5.5 18.5l1.1-4.2L16.1 4.8a1.4 1.4 0 0 1 2 0l1.1 1.1a1.4 1.4 0 0 1 0 2L9.7 17.4 5.5 18.5Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>`,
-          },
-          {
-            title: "View saved",
-            description: "Open grants you saved",
-            href: "/accounts/saved/",
-            tone: "gold",
-            icon: `<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M7 4.5h10a1 1 0 0 1 1 1V20l-6-3.2L6 20V5.5a1 1 0 0 1 1-1Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>`,
-          },
-          {
-            title: "Ask anything",
-            description: "Type a question below",
-            focusInput: true,
-            tone: "olive",
-            icon: `<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5.5 6.5h13A2.5 2.5 0 0 1 21 9v6.2a2.5 2.5 0 0 1-2.5 2.5H12l-3.8 2.6V17.7H5.5A2.5 2.5 0 0 1 3 15.2V9a2.5 2.5 0 0 1 2.5-2.5Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>`,
-          },
-        ]
+      ? starterCardsForReady()
       : [
           {
             title: "Start project setup",
             description: "Answer a few quick questions",
-            value: "start setup",
-            tone: "forest",
-            icon: `<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 7h14M5 12h14M5 17h9" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>`,
+            action: "setup",
           },
           {
             title: "What you’ll get",
             description: "Ranked matches from 3 sources",
-            value: "start setup",
-            tone: "sage",
-            icon: `<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="11" cy="11" r="6.5" stroke="currentColor" stroke-width="1.8"/><path d="m16 16 4 4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>`,
+            action: "setup",
           },
           {
             title: "View saved",
             description: "Open grants you saved",
+            action: "link",
             href: "/accounts/saved/",
-            tone: "gold",
-            icon: `<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M7 4.5h10a1 1 0 0 1 1 1V20l-6-3.2L6 20V5.5a1 1 0 0 1 1-1Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>`,
           },
           {
             title: "Ask anything",
             description: "Type a question below",
-            focusInput: true,
-            tone: "olive",
-            icon: `<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 12h10M12 6l6 6-6 6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+            action: "focus_input",
           },
         ];
 
@@ -692,8 +680,8 @@
       const btn = document.createElement("button");
       btn.type = "button";
       btn.className = "chat-starter-card";
+      // Text-only, modern card — prompts are customizable, so no per-card icon.
       btn.innerHTML = `
-        <span class="chat-starter-card-icon is-${card.tone}" aria-hidden="true">${card.icon}</span>
         <span class="chat-starter-card-copy">
           <strong>${escapeHtml(card.title)}</strong>
           <span>${escapeHtml(card.description)}</span>
@@ -701,11 +689,16 @@
       `;
       btn.addEventListener("click", () => {
         if (busy) return;
-        if (card.href) {
-          window.location.href = card.href;
+        const action = card.action || "search";
+
+        // Open a link (e.g. View saved).
+        if (action === "link" || card.href) {
+          if (card.href) window.location.href = card.href;
           return;
         }
-        if (card.focusInput) {
+
+        // Focus the composer (Ask anything).
+        if (action === "focus_input") {
           hideStarter();
           setSuggestions([
             { label: "Find grants", value: "find grants" },
@@ -714,8 +707,11 @@
           input.focus();
           return;
         }
+
         hideStarter();
-        if (card.value === "start setup") {
+
+        // Launch the onboarding intake (setup cards for a new user).
+        if (action === "setup") {
           const firstEmpty = INTAKE_STEPS.find((s) => {
             const value = (bootstrap.profile || {})[s.id];
             return value == null || String(value).trim() === "";
@@ -727,7 +723,16 @@
           askStep(firstEmpty || INTAKE_STEPS[0]);
           return;
         }
-        handleUserMessage(card.value, card.title);
+
+        // Re-open project intake (Update my project).
+        if (action === "update_project") {
+          startProjectUpdate(card.title);
+          return;
+        }
+
+        // Search: hand the configured query to the matcher (saved profile +
+        // overrides, exactly as before). The card title is what shows in chat.
+        runStarterSearch(card);
       });
       starterGridEl.appendChild(btn);
     });
@@ -1485,15 +1490,37 @@
     await finishIntake();
   }
 
-  function wantsFindGrants(text) {
-    return /\b(find|search|match|show|get)\b.*\bgrant/i.test(text) ||
-      /^(find grants|search again|try again|match me|show matches)$/i.test(text);
-  }
-
+  // Only an explicit "update/change/edit my project/profile/intake" request
+  // re-opens intake. Everything else from an onboarded user is a grant search.
   function wantsUpdateProject(text) {
     return /\b(update|change|edit|redo)\b.*\b(project|profile|details|intake)\b/i.test(
       text
     ) || /^update my project$/i.test(text);
+  }
+
+  // Starter card "Update my project" — open intake directly, independent of the
+  // card's (customizable) label text.
+  async function startProjectUpdate(displayText) {
+    await appendText("user", displayText || "Update my project");
+    clearSuggestions();
+    await appendText(
+      "assistant",
+      "Sure — let's refresh your project details. You can also edit everything later in Settings."
+    );
+    askStep(INTAKE_STEPS[0]);
+  }
+
+  // Starter search card — show the card label in the thread, but run the search
+  // with the card's configured query so it passes to the model with the saved
+  // profile (same override logic as a typed message).
+  async function runStarterSearch(card) {
+    busy = true;
+    setComposerEnabled(false);
+    const query = String(card.query || card.title || "").trim();
+    await appendText("user", card.title || query);
+    clearSuggestions();
+    // loadMatches manages keepBusy/busy and re-enables the composer when done.
+    await loadMatches(query);
   }
 
   async function handleReadyMessage(text) {
@@ -1509,19 +1536,13 @@
       return;
     }
 
-    if (wantsFindGrants(text) || /^(yes|yeah|yep|ok|okay|sure|go ahead)$/i.test(text)) {
-      await loadMatches(text);
-      return;
-    }
-
-    await appendText(
-      "assistant",
-      "I can find grant matches from your saved project profile, or walk you through updating those details. What would you like to do?"
-    );
-    setSuggestions([
-      { label: "Find grants", value: "find grants" },
-      { label: "Update my project", value: "update my project" },
-    ]);
+    // Onboarding is complete: treat every other message as a grant search and
+    // pass the raw text as the query. The backend (resolve_search_context)
+    // applies any location / topic / budget / org overrides on top of the saved
+    // profile — so "find in california" returns California grants, while a bare
+    // "find grants" uses the saved project profile defaults. Never stop to ask
+    // "what would you like to do?"; just run the search.
+    await loadMatches(text);
   }
 
   async function handleUserMessage(value, displayText) {

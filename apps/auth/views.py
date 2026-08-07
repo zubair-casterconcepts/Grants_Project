@@ -49,6 +49,72 @@ def _prepare_matches(user, matches):
     return prepared, len(saved_keys)
 
 
+# Used when the grant_starter_prompt table is empty (or unavailable) so the
+# starter cards always render — identical to the original hardcoded set.
+_DEFAULT_STARTER_PROMPTS = [
+    {
+        "key": "find_grants",
+        "title": "Find grants",
+        "description": "Search by focus & location",
+        "action": "search",
+        "query": "find grants",
+        "href": "",
+    },
+    {
+        "key": "update_project",
+        "title": "Update my project",
+        "description": "Refresh intake details",
+        "action": "update_project",
+        "query": "",
+        "href": "",
+    },
+    {
+        "key": "view_saved",
+        "title": "View saved",
+        "description": "Open grants you saved",
+        "action": "link",
+        "query": "",
+        "href": "/accounts/saved/",
+    },
+    {
+        "key": "ask_anything",
+        "title": "Ask anything",
+        "description": "Type a question below",
+        "action": "focus_input",
+        "query": "",
+        "href": "",
+    },
+]
+
+
+def _starter_prompts() -> list[dict]:
+    """Active starter cards from the DB, or the built-in defaults if none exist."""
+    from apps.accounts.models import StarterPrompt
+
+    try:
+        rows = list(
+            StarterPrompt.objects.filter(is_active=True).order_by("position", "id")
+        )
+    except Exception:
+        # Table not migrated yet / DB hiccup — never break the chat shell.
+        rows = []
+
+    if not rows:
+        return [dict(prompt) for prompt in _DEFAULT_STARTER_PROMPTS]
+
+    return [
+        {
+            "key": row.key,
+            "title": row.title,
+            "description": row.description,
+            "action": row.action,
+            "query": row.query,
+            "href": row.href,
+        }
+        for row in rows
+    ]
+
+
 def _chat_bootstrap(profile: Profile) -> dict:
     priority_choices = [
         {"value": value, "label": label}
@@ -87,6 +153,7 @@ def _chat_bootstrap(profile: Profile) -> dict:
             "org_type": org_choices,
             "location_state": state_choices,
         },
+        "starter_prompts": _starter_prompts(),
     }
 
 

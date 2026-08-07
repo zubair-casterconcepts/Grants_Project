@@ -5,8 +5,13 @@ from django.http import JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.views.decorators.http import require_http_methods, require_POST
 
-from .forms import PasswordUpdateForm, ProfileAccountForm, ProfileIntakeForm
-from .models import SavedGrant
+from .forms import (
+    PasswordUpdateForm,
+    ProfileAccountForm,
+    ProfileIntakeForm,
+    StarterPromptForm,
+)
+from .models import SavedGrant, StarterPrompt
 from .services import get_or_create_profile
 
 
@@ -111,6 +116,83 @@ def change_password_view(request):
 @login_required
 def profile_view(request):
     return redirect("accounts:profile_settings")
+
+
+def _starter_prompt_context(request, *, create_form=None, error_pk=None, error_form=None):
+    """Build the list of (prompt, bound-form) rows plus the add form."""
+    rows = []
+    for prompt in StarterPrompt.objects.all().order_by("position", "id"):
+        if error_pk is not None and prompt.pk == error_pk and error_form is not None:
+            rows.append((prompt, error_form))
+        else:
+            rows.append((prompt, StarterPromptForm(instance=prompt)))
+    return {
+        "rows": rows,
+        "create_form": create_form or StarterPromptForm(),
+        "open_create": create_form is not None,
+        "saved_count": SavedGrant.objects.filter(user=request.user).count(),
+    }
+
+
+@login_required
+@require_http_methods(["GET", "POST"])
+def starter_prompts_view(request):
+    """Manage the customizable chat starter cards ("instructions"). Staff only."""
+    profile = get_or_create_profile(request.user)
+    if profile.needs_onboarding:
+        return redirect("auth:home")
+    if not request.user.is_staff:
+        messages.error(request, "You don't have access to chat instructions.")
+        return redirect("auth:home")
+
+    if request.method == "POST":
+        op = (request.POST.get("op") or "").strip()
+
+        if op == "delete":
+            deleted, _ = StarterPrompt.objects.filter(pk=request.POST.get("id")).delete()
+            messages.success(
+                request,
+                "Instruction removed." if deleted else "That instruction no longer exists.",
+            )
+            return redirect("accounts:starter_prompts")
+
+        if op == "create":
+            form = StarterPromptForm(request.POST)
+            if form.is_valid():
+                form.save()
+                messages.success(request, "Instruction added.")
+                return redirect("accounts:starter_prompts")
+            messages.error(request, "Please fix the errors in the new instruction.")
+            return render(
+                request,
+                "accounts/starter_prompts.html",
+                _starter_prompt_context(request, create_form=form),
+                status=400,
+            )
+
+        if op == "update":
+            instance = get_object_or_404(StarterPrompt, pk=request.POST.get("id"))
+            form = StarterPromptForm(request.POST, instance=instance)
+            if form.is_valid():
+                form.save()
+                messages.success(request, "Instruction updated.")
+                return redirect("accounts:starter_prompts")
+            messages.error(request, f"Please fix the errors in “{instance.title}”.")
+            return render(
+                request,
+                "accounts/starter_prompts.html",
+                _starter_prompt_context(request, error_pk=instance.pk, error_form=form),
+                status=400,
+            )
+
+        messages.error(request, "Unknown action.")
+        return redirect("accounts:starter_prompts")
+
+    return render(
+        request,
+        "accounts/starter_prompts.html",
+        _starter_prompt_context(request),
+    )
 
 
 @login_required

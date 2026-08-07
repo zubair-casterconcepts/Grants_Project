@@ -66,6 +66,15 @@
             </svg>
             Configuration
           </a>
+          {% if request.user.is_staff %}
+          <a class="dash-nav-btn" href="{% url 'accounts:starter_prompts' %}" data-loader-message="Opening chat instructions…">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <rect x="4.5" y="4.5" width="15" height="15" rx="3" stroke="currentColor" stroke-width="1.7"/>
+              <path d="M8 9.5h8M8 13h5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+            </svg>
+            Instructions
+          </a>
+          {% endif %}
           {% include "partials/profile_menu.html" %}
         </div>
       </header>

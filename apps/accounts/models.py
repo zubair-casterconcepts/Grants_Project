@@ -144,6 +144,66 @@ class SavedGrant(models.Model):
             return 0
 
 
+class StarterPrompt(models.Model):
+    """
+    Customizable predefined chat starter cards ("Find grants", "Update my
+    project", "View saved", "Ask anything").
+
+    Rows are global config (not per-user) and are meant to be edited via SQL or
+    Django admin. `title`/`description` set the text shown on the card. For a
+    SEARCH card, `query` is the exact text handed to the matcher on top of the
+    saved profile — identical to the user typing that text into the composer, so
+    the existing profile + override logic is unchanged.
+    """
+
+    class Action(models.TextChoices):
+        SEARCH = "search", "Search grants"
+        UPDATE_PROJECT = "update_project", "Update project"
+        LINK = "link", "Open link"
+        FOCUS_INPUT = "focus_input", "Focus composer"
+
+    key = models.SlugField(
+        max_length=64,
+        unique=True,
+        help_text="Stable identifier, e.g. find_grants.",
+    )
+    title = models.CharField(max_length=120, help_text="Card heading shown to the user.")
+    description = models.CharField(
+        max_length=200,
+        blank=True,
+        help_text="Card subtitle shown under the heading.",
+    )
+    action = models.CharField(
+        max_length=32,
+        choices=Action.choices,
+        default=Action.SEARCH,
+        help_text="What clicking the card does.",
+    )
+    query = models.CharField(
+        max_length=500,
+        blank=True,
+        help_text="SEARCH cards only: exact text passed to the matcher with the saved profile.",
+    )
+    href = models.CharField(
+        max_length=300,
+        blank=True,
+        help_text="LINK cards only: URL to open (e.g. /accounts/saved/).",
+    )
+    position = models.PositiveIntegerField(default=0, help_text="Sort order (ascending).")
+    is_active = models.BooleanField(default=True, help_text="Uncheck to hide the card.")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "grant_starter_prompt"
+        ordering = ["position", "id"]
+        verbose_name = "Starter prompt"
+        verbose_name_plural = "Starter prompts"
+
+    def __str__(self) -> str:
+        return f"{self.title} ({self.action})"
+
+
 class Conversation(models.Model):
     """A ChatGPT-style chat thread owned by a user, optionally linked to a Project."""
 

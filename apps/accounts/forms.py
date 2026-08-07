@@ -1,10 +1,11 @@
 from django import forms
 from django.contrib.auth import password_validation
 from django.contrib.auth.forms import PasswordChangeForm as DjangoPasswordChangeForm
+from django.utils.text import slugify
 
 from services.location_utils import US_STATE_NAMES, normalize_location
 
-from .models import Profile
+from .models import Profile, StarterPrompt
 
 STATE_CHOICES = [("", "Select state")] + [
     (abbr, f"{abbr} — {name}") for abbr, name in US_STATE_NAMES.items()
@@ -70,6 +71,65 @@ class PasswordUpdateForm(DjangoPasswordChangeForm):
         super().__init__(user, *args, **kwargs)
         for name in ("old_password", "new_password1", "new_password2"):
             self.fields[name].required = True
+
+
+class StarterPromptForm(forms.ModelForm):
+    """Add / edit a customizable chat starter card ("instruction")."""
+
+    class Meta:
+        model = StarterPrompt
+        # Every card managed here is a grant search that sends its query with the
+        # saved profile. `action`/`href` are intentionally not exposed — they are
+        # left at their stored/default values so built-in cards keep working.
+        fields = (
+            "title",
+            "description",
+            "query",
+            "position",
+            "is_active",
+            "key",
+        )
+        widgets = {
+            "title": forms.TextInput(attrs={"placeholder": "e.g. Find grants"}),
+            "description": forms.TextInput(
+                attrs={"placeholder": "e.g. Search by focus & location"}
+            ),
+            "query": forms.TextInput(
+                attrs={"placeholder": "Text sent to the grant matcher, e.g. find education grants in CA"}
+            ),
+            "position": forms.NumberInput(attrs={"min": "0", "step": "1"}),
+            "key": forms.TextInput(
+                attrs={"placeholder": "Auto-generated from title if left blank"}
+            ),
+        }
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["title"].required = True
+        for name in ("description", "query", "key"):
+            self.fields[name].required = False
+        self.fields["position"].required = False
+
+    def clean_position(self):
+        return self.cleaned_data.get("position") or 0
+
+    def clean(self):
+        cleaned = super().clean()
+
+        # Auto-fill a unique slug key from the title when left blank.
+        key = (cleaned.get("key") or "").strip()
+        if not key:
+            base = slugify(cleaned.get("title") or "")[:56] or "prompt"
+            qs = StarterPrompt.objects.all()
+            if self.instance.pk:
+                qs = qs.exclude(pk=self.instance.pk)
+            existing = set(qs.values_list("key", flat=True))
+            candidate, suffix = base, 2
+            while candidate in existing:
+                candidate = f"{base}-{suffix}"
+                suffix += 1
+            cleaned["key"] = candidate
+        return cleaned
 
 
 class ProfileIntakeForm(forms.ModelForm):

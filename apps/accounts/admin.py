@@ -1,7 +1,7 @@
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin as DjangoUserAdmin
 
-from .models import Conversation, GrantUser, Message, Profile, SavedGrant
+from .models import Conversation, GrantUser, Message, Profile, SavedGrant, StarterPrompt
 
 
 class ProfileInline(admin.StackedInline):
@@ -81,6 +81,15 @@ class ConversationAdmin(admin.ModelAdmin):
     autocomplete_fields = ("user", "project")
     readonly_fields = ("created_at", "updated_at")
     inlines = [MessageInline]
+
+
+@admin.register(StarterPrompt)
+class StarterPromptAdmin(admin.ModelAdmin):
+    list_display = ("title", "action", "query", "href", "position", "is_active", "updated_at")
+    list_filter = ("action", "is_active")
+    list_editable = ("action", "position", "is_active")
+    search_fields = ("key", "title", "description", "query")
+    ordering = ("position", "id")
 
 
 @admin.register(Message)
