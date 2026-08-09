@@ -26,6 +26,12 @@ from typing import Any, Awaitable, Callable, TypeVar
 from pydantic import BaseModel, Field
 
 from services.async_utils import run_sync
+from services.grant_categories import (
+    CATEGORY_CHOICES,
+    FALLBACK_CATEGORY,
+    derive_category,
+    normalize_category,
+)
 from services.query_context import resolve_search_context, scoring_criteria
 
 logger = logging.getLogger(__name__)
@@ -47,8 +53,9 @@ You are the Grants matching agent. Identify the strongest funding opportunities 
 4. For granted_ai, also pass org_type from the profile when available.
 5. Keep relevant opportunities and rank by topic, category, location, then budget.
 6. Score each grant 0.0-1.0, set chance_percent to round(score * 100), and add a short reason.
-7. Preserve provider fields from tools (agency, agency_address, contacts, amounts, dates).
-8. Return structured matches with source grants_gov, usaspending, or granted_ai.
+7. Set category to the grant's own subject area (Education, Arts, Health, Housing, etc.).
+8. Preserve provider fields from tools (agency, agency_address, contacts, amounts, dates).
+9. Return structured matches with source grants_gov, usaspending, or granted_ai.
 
 ## Rules
 
@@ -100,6 +107,12 @@ class GrantMatch(BaseModel):
     alns: str = ""
     funding_categories: str = ""
     funding_instruments: str = ""
+    category: str = Field(
+        default="",
+        description=(
+            "Subject area of the opportunity, one of: " + ", ".join(CATEGORY_CHOICES)
+        ),
+    )
     score: float = Field(
         default=0.0,
         ge=0.0,
@@ -128,6 +141,13 @@ class GrantScoreRow(BaseModel):
     score: float = Field(ge=0.0, le=1.0)
     chance_tier: str = Field(description="high, medium, or low")
     reason: str = ""
+    category: str = Field(
+        default="",
+        description=(
+            "Subject area of the grant itself (not the user's focus), one of: "
+            + ", ".join(CATEGORY_CHOICES)
+        ),
+    )
 
 
 class GrantScoreResult(BaseModel):
@@ -283,6 +303,7 @@ def _attach_display_fields(matches: list[dict[str, Any]]) -> list[dict[str, Any]
             row.setdefault(key, "")
             if row[key] is None:
                 row[key] = ""
+        row["category"] = normalize_category(row.get("category")) or derive_category(row)
         prepared.append(row)
     return prepared
 
@@ -550,6 +571,7 @@ def _grant_score_payload(row: dict[str, Any], index: int) -> dict[str, Any]:
         "agency": row.get("agency") or row.get("top_agency") or "",
         "description": desc,
         "funding_categories": row.get("funding_categories") or "",
+        "category_hint": row.get("category") or "",
         "eligibility": str(row.get("eligibility") or "")[:280],
         "amount": row.get("amount") or "",
         "award_ceiling": row.get("award_ceiling") or "",
@@ -625,6 +647,9 @@ def _merge_score_rows(
         if tier not in {"high", "medium", "low"}:
             tier = _chance_tier(score)
         reason = str(ai.get("reason") or "").strip()[:180]
+        category = normalize_category(ai.get("category"))
+        if category and category != FALLBACK_CATEGORY:
+            out["category"] = category
         out["score"] = round(score, 2)
         out["chance_percent"] = int(round(score * 100))
         out["chance_tier"] = tier
@@ -659,6 +684,7 @@ async def _apply_ai_scores_async(
     payload = {
         "user_query": criteria.get("user_query") or "",
         "search_criteria": criteria,
+        "category_options": list(CATEGORY_CHOICES),
         "grants": [_grant_score_payload(row, i) for i, row in enumerate(candidates)],
     }
     score_prompt = (
@@ -666,7 +692,9 @@ async def _apply_ai_scores_async(
         "Never use a conflicting older location/topic/budget outside search_criteria. "
         "Include every grant index exactly once. "
         "chance_tier: high>=0.75, medium>=0.55, else low. "
-        "reason max 140 chars.\n\n"
+        "reason max 140 chars. "
+        "category: the grant's own subject area, copied exactly from "
+        "category_options (keep category_hint unless it is clearly wrong).\n\n"
         f"{json.dumps(payload, ensure_ascii=True)}"
     )
 
@@ -681,6 +709,7 @@ async def _apply_ai_scores_async(
                 "The user_query is the primary intent. search_criteria already applies "
                 "query overrides on top of profile defaults. "
                 "Score using topic/priority, location, budget, eligibility/org type, status. "
+                "Also label each grant's own subject area using category_options. "
                 "Return structured scores for every grant index."
             ),
             tools=[],
@@ -701,9 +730,11 @@ async def _apply_ai_scores_async(
     model = os.getenv("OPENAI_MODEL", "gpt-5.5").strip() or "gpt-5.5"
     system = (
         "You score grant opportunities for fit/chance against SEARCH_CRITERIA only. "
-        "Return JSON: {\"scores\":[{\"index\":0,\"score\":0.0,\"chance_tier\":\"high|medium|low\",\"reason\":\"...\"}]}. "
+        "Return JSON: {\"scores\":[{\"index\":0,\"score\":0.0,\"chance_tier\":\"high|medium|low\","
+        "\"reason\":\"...\",\"category\":\"...\"}]}. "
         "Include every grant index exactly once. score is 0.0-1.0. "
-        "chance_tier: high>=0.75, medium>=0.55, else low."
+        "chance_tier: high>=0.75, medium>=0.55, else low. "
+        "category must be copied exactly from category_options."
     )
     try:
         from openai import AsyncOpenAI

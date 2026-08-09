@@ -165,6 +165,8 @@
 
     const run = () => {
       scrollRaf = 0;
+      // Re-check: the user may have scrolled up after this frame was queued.
+      if (!force && !stickToBottom) return;
       const top = Math.max(
         document.documentElement.scrollHeight || 0,
         document.body.scrollHeight || 0
@@ -194,6 +196,35 @@
 
     if (scrollRaf) cancelAnimationFrame(scrollRaf);
     scrollRaf = requestAnimationFrame(run);
+  }
+
+  // Streaming rewrites content above the viewport (status text rewraps, the
+  // status row is dropped when results land). Anchoring on the topmost visible
+  // row keeps the reader on the same content instead of shifting under them.
+  function captureScrollAnchor() {
+    if (stickToBottom || !transcript) return null;
+    const anchors = [];
+    for (const row of Array.from(transcript.children)) {
+      const rect = row.getBoundingClientRect();
+      if (rect.bottom <= 0) continue;
+      anchors.push({ row, top: rect.top });
+      if (anchors.length >= 3) break;
+    }
+    return anchors.length ? anchors : null;
+  }
+
+  function restoreScrollAnchor(anchors) {
+    if (!anchors) return;
+    const anchor = anchors.find((item) => item.row.isConnected);
+    if (!anchor) return;
+    const delta = anchor.row.getBoundingClientRect().top - anchor.top;
+    if (Math.abs(delta) < 1) return;
+    ignoreScrollEvent = true;
+    window.scrollBy({ top: delta, left: 0, behavior: "auto" });
+    requestAnimationFrame(() => {
+      ignoreScrollEvent = false;
+      updateStickToBottom();
+    });
   }
 
   function autosize() {
@@ -960,6 +991,7 @@
     cash: `<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="3.5" y="6.5" width="17" height="11" rx="2" stroke="currentColor" stroke-width="1.7"/><circle cx="12" cy="12" r="2.3" stroke="currentColor" stroke-width="1.7"/><path d="M7 12h.01M17 12h.01" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>`,
     calendar: `<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="3.5" y="5.5" width="17" height="15" rx="2" stroke="currentColor" stroke-width="1.7"/><path d="M3.5 10h17M8 3.5V7M16 3.5V7" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>`,
     status: `<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="8" stroke="currentColor" stroke-width="1.7"/><path d="m8.8 12.2 2.2 2.2 4.4-4.6" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+    tag: `<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4.5 11V5.6c0-.6.5-1.1 1.1-1.1H11l8 8-6.5 6.5-8-8Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><circle cx="8.4" cy="8.4" r="1.2" fill="currentColor"/></svg>`,
   };
 
   function labelWithIcon(icon, text) {
@@ -1081,6 +1113,7 @@
         <input type="hidden" name="opp_status" value="${attr(match.opp_status || "")}">
         <input type="hidden" name="number" value="${attr(match.number || "")}">
         <input type="hidden" name="amount" value="${attr(match.amount || "")}">
+        <input type="hidden" name="category" value="${attr(match.category || "")}">
         <input type="hidden" name="score" value="${attr(match.score ?? "")}">
         <input type="hidden" name="reason" value="${attr(match.reason || "")}">
         <input type="hidden" name="description" value="${attr(match.description || "")}">
@@ -1111,6 +1144,10 @@
     const titleHtml = match.url
       ? `<a class="match-title-link" href="${attr(match.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(match.title || "Untitled grant")}</a>`
       : escapeHtml(match.title || "Untitled grant");
+    const category = String(match.category || "").trim();
+    const categoryHtml = category
+      ? `<span class="category-pill" title="Category: ${attr(category)}"><span class="category-pill-icon" aria-hidden="true">${icons.tag}</span><span class="visually-hidden">Category:</span><span>${escapeHtml(category)}</span></span>`
+      : "";
 
     return `
       <article class="match-card chance-${attr(tier || "medium")}" style="--i: ${index}">
@@ -1118,6 +1155,7 @@
         <div class="match-content">
           <div class="match-head">
             <h2>${titleHtml}</h2>
+            ${categoryHtml}
             <span class="chance-pill chance-${attr(tier || "medium")}">${escapeHtml(chanceLabel)}</span>
             <span class="source-pill source-${attr(match.source || "grants_gov")}">${escapeHtml(sourceLabel(match.source))}</span>
           </div>
@@ -1248,11 +1286,12 @@
       if (!statusBubble) {
         statusRow = await appendText("assistant", text, { persist: false });
         statusBubble = statusRow.querySelector(".chat-bubble");
-        scrollToBottom({ force: true });
         return;
       }
+      const anchor = captureScrollAnchor();
       statusBubble.textContent = text;
-      scrollToBottom({ force: true });
+      restoreScrollAnchor(anchor);
+      scrollToBottom();
     };
 
     const ensureResultsShell = async (placeText) => {
@@ -1264,7 +1303,6 @@
       );
       summaryEl = resultsRow.querySelector(".chat-match-summary");
       matchesEl = resultsRow.querySelector(".chat-matches");
-      scrollToBottom({ force: true });
     };
 
     const appendMatchCards = (matches) => {
@@ -1277,22 +1315,25 @@
         cardIndex += 1;
       }
       bindSaveForms(resultsRow);
-      scrollToBottom({ force: true });
+      scrollToBottom();
     };
 
     const renderFinal = async (matches, location, savedCount) => {
       const placeText = placeTextFrom(location);
       if (!matches.length) {
+        const emptyAnchor = captureScrollAnchor();
         if (resultsRow) removeNode(resultsRow);
         const emptyMsg = `I couldn't find ranked matches yet${placeText}. You can update your project details in chat, then ask me to search again.`;
         await setStatus(emptyMsg);
+        restoreScrollAnchor(emptyAnchor);
         await persistMessage("assistant", emptyMsg);
-        scrollToBottom({ force: true });
+        scrollToBottom();
         return;
       }
       await ensureResultsShell(placeText);
       const noun = matches.length === 1 ? "opportunity" : "opportunities";
       const summary = `Here are ${matches.length} ranked ${noun} from Grants.gov, USASpending, and GrantedAI${placeText}.`;
+      const anchor = captureScrollAnchor();
       if (summaryEl) {
         summaryEl.textContent = summary;
       }
@@ -1303,16 +1344,17 @@
       }
       bindSaveForms(resultsRow);
       if (typeof savedCount === "number") updateSavedNavCount(savedCount);
+      // Removing the status row shortens the page above the results.
       if (statusRow) removeNode(statusRow);
       statusRow = null;
       statusBubble = null;
+      restoreScrollAnchor(anchor);
       await persistMessage("assistant", summary, {
         type: "matches",
         matches,
         location: location || {},
       });
-      // Removing the status row shortens the page; re-pin immediately (instant).
-      scrollToBottom({ force: true });
+      scrollToBottom();
     };
 
     try {

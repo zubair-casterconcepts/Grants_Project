@@ -57,6 +57,14 @@
                   {{ grant.title }}
                 {% endif %}
               </h2>
+              {% if grant.category %}
+                <span class="category-pill" title="Category: {{ grant.category }}">
+                  <span class="category-pill-icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" fill="none"><path d="M4.5 11V5.6c0-.6.5-1.1 1.1-1.1H11l8 8-6.5 6.5-8-8Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><circle cx="8.4" cy="8.4" r="1.2" fill="currentColor"/></svg>
+                  </span>
+                  <span>{{ grant.category }}</span>
+                </span>
+              {% endif %}
               <span class="source-pill source-{{ grant.source }}">
                 {% if grant.source == "usaspending" %}USASpending{% elif grant.source == "granted_ai" %}GrantedAI{% else %}Grants.gov{% endif %}
               </span>

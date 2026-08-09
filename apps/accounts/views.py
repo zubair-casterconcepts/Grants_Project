@@ -272,6 +272,7 @@ def save_grant_view(request):
             "opp_status": (request.POST.get("opp_status") or "")[:120],
             "number": (request.POST.get("number") or "")[:120],
             "amount": (request.POST.get("amount") or "")[:64],
+            "category": (request.POST.get("category") or "")[:64],
             "score": score,
             "reason": request.POST.get("reason") or "",
             "description": request.POST.get("description") or "",

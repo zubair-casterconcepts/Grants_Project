@@ -114,6 +114,7 @@ class SavedGrant(models.Model):
     opp_status = models.CharField(max_length=120, blank=True)
     number = models.CharField(max_length=120, blank=True)
     amount = models.CharField(max_length=64, blank=True)
+    category = models.CharField(max_length=64, blank=True)
     score = models.FloatField(null=True, blank=True)
     reason = models.TextField(blank=True)
     description = models.TextField(blank=True)

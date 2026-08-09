@@ -468,6 +468,36 @@ body {
   color: #5f5f5f;
 }
 
+.category-pill {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.24rem;
+  padding: 0.12rem 0.46rem;
+  border-radius: 999px;
+  border: 1px solid #ddd3c0;
+  background: #f7f2e8;
+  color: #7a5f34;
+  font-size: 0.64rem;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  line-height: 1.2;
+}
+
+.category-pill-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 0.62rem;
+  height: 0.62rem;
+  flex-shrink: 0;
+}
+
+.category-pill-icon svg {
+  width: 100%;
+  height: 100%;
+}
+
 .source-pill {
   flex-shrink: 0;
   display: inline-flex;
