@@ -70,6 +70,10 @@ class Profile(models.Model):
         blank=True,
     )
     eligibility_notes = models.TextField(blank=True)
+    weekly_digest_enabled = models.BooleanField(
+        default=True,
+        help_text="Send this user the Monday grant digest email.",
+    )
     onboarding_completed = models.BooleanField(default=False)
 
     created_at = models.DateTimeField(auto_now_add=True)
@@ -143,6 +147,48 @@ class SavedGrant(models.Model):
             return max(0, min(100, int(round(float(self.score) * 100))))
         except (TypeError, ValueError):
             return 0
+
+
+class WeeklyDigestLog(models.Model):
+    """
+    One row per user per digest week, so re-running the sender is idempotent and
+    a failed week can be retried. `week_start` is the Monday (UTC) of the week
+    the digest covers.
+    """
+
+    class Status(models.TextChoices):
+        SENT = "sent", "Sent"
+        SKIPPED = "skipped", "Skipped"
+        FAILED = "failed", "Failed"
+
+    user = models.ForeignKey(
+        GrantUser,
+        on_delete=models.CASCADE,
+        related_name="weekly_digests",
+    )
+    week_start = models.DateField()
+    status = models.CharField(max_length=16, choices=Status.choices)
+    email = models.CharField(max_length=254, blank=True)
+    match_count = models.PositiveIntegerField(default=0)
+    webhook_status = models.PositiveIntegerField(null=True, blank=True)
+    detail = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "grant_weekly_digest_log"
+        ordering = ["-week_start", "user_id"]
+        verbose_name = "Weekly digest log"
+        verbose_name_plural = "Weekly digest logs"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["user", "week_start"],
+                name="uniq_user_week_digest",
+            )
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.user.get_username()} {self.week_start} ({self.status})"
 
 
 class StarterPrompt(models.Model):

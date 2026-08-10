@@ -177,3 +177,42 @@ if GRANTED_API_KEY:
 
 CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0")
 CELERY_RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND", CELERY_BROKER_URL)
+CELERY_TIMEZONE = os.getenv("CELERY_TIMEZONE", "UTC")
+CELERY_ENABLE_UTC = True
+# Monday 09:00 UTC — builds digests and POSTs each user's payload to n8n.
+# Requires Redis + `celery -A grants worker` + `celery -A grants beat`.
+try:
+    from celery.schedules import crontab
+except ImportError:  # Celery not installed in this environment
+    CELERY_BEAT_SCHEDULE = {}
+else:
+    _digest_hour = int(os.getenv("WEEKLY_DIGEST_HOUR_UTC", "9"))
+    _digest_minute = int(os.getenv("WEEKLY_DIGEST_MINUTE_UTC", "0"))
+    CELERY_BEAT_SCHEDULE = {
+        "weekly-grant-digest-monday": {
+            "task": "accounts.send_weekly_digests",
+            "schedule": crontab(
+                minute=_digest_minute,
+                hour=_digest_hour,
+                day_of_week=1,  # Monday
+            ),
+        },
+    }
+
+# Weekly grant digest → n8n webhook (n8n owns the actual email delivery).
+N8N_WEEKLY_WEBHOOK_URL = os.getenv("N8N_WEEKLY_GRANTED_WEBHOOK_URL", "").strip()
+# Header name must match the n8n "Header Auth" credential on the webhook node.
+N8N_WEBHOOK_AUTH_HEADER = (
+    os.getenv("N8N_WEBHOOK_AUTH_HEADER", "").strip() or "X-Webhook-Token"
+)
+N8N_WEBHOOK_AUTH_HEADER_VALUE = os.getenv("N8N_WEBHOOK_AUTH_HEADER_VALUE", "").strip()
+N8N_WEBHOOK_TIMEOUT_SECONDS = float(os.getenv("N8N_WEBHOOK_TIMEOUT_SECONDS", "60"))
+
+# Digest content/branding. SITE_BASE_URL builds absolute links inside the email.
+SITE_BASE_URL = os.getenv("SITE_BASE_URL", "http://localhost:8000").rstrip("/")
+SITE_NAME = os.getenv("SITE_NAME", "Grants").strip() or "Grants"
+# 0 = include every ranked match the matcher returns (no email-side trim).
+WEEKLY_DIGEST_MAX_GRANTS = int(os.getenv("WEEKLY_DIGEST_MAX_GRANTS", "0"))
+# When MAX_GRANTS is 0, ask the matcher for up to this many ranked opportunities.
+WEEKLY_DIGEST_MATCHER_LIMIT = int(os.getenv("WEEKLY_DIGEST_MATCHER_LIMIT", "50"))
+WEEKLY_DIGEST_REPLY_TO = os.getenv("WEEKLY_DIGEST_REPLY_TO", "").strip()

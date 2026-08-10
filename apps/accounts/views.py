@@ -1,9 +1,23 @@
+import logging
+import threading
+
+from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth import update_session_auth_hash
 from django.contrib.auth.decorators import login_required
+from django.db import connection
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
+from django.utils.crypto import constant_time_compare
+from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods, require_POST
+
+from services.weekly_digest import (
+    DigestConfigError,
+    is_digest_day,
+    send_weekly_digests,
+    week_start_for,
+)
 
 from .forms import (
     PasswordUpdateForm,
@@ -13,6 +27,8 @@ from .forms import (
 )
 from .models import SavedGrant, StarterPrompt
 from .services import get_or_create_profile
+
+logger = logging.getLogger(__name__)
 
 
 @login_required
@@ -300,3 +316,108 @@ def unsave_grant_view(request, saved_id: int):
     grant.delete()
     messages.success(request, "Removed from saved grants.")
     return redirect(request.POST.get("next") or "accounts:saved_grants")
+
+
+def _digest_trigger_authorized(request) -> bool:
+    secret = settings.N8N_WEBHOOK_AUTH_HEADER_VALUE
+    if not secret:
+        return False
+    provided = request.headers.get(settings.N8N_WEBHOOK_AUTH_HEADER, "")
+    if not provided:
+        bearer = request.headers.get("Authorization", "")
+        provided = bearer[7:] if bearer.lower().startswith("bearer ") else bearer
+    return constant_time_compare(provided.strip(), secret)
+
+
+def _flag(request, name: str) -> bool:
+    return (request.GET.get(name) or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _strip_payloads(report: dict) -> dict:
+    """Digest payloads embed the full email HTML — too big for a trigger response."""
+    trimmed = dict(report)
+    trimmed["results"] = [
+        {key: value for key, value in result.items() if key != "payload"}
+        for result in report.get("results", [])
+    ]
+    return trimmed
+
+
+@csrf_exempt
+@require_POST
+def run_weekly_digests_view(request):
+    """
+    Machine endpoint so an external scheduler (n8n Schedule Trigger, cron, Task
+    Scheduler) can kick off the weekly digest run.
+
+    Auth: send the same shared secret used for the outbound webhook, either as
+    the configured header (default `X-Webhook-Token`) or `Authorization: Bearer`.
+
+    Query flags: `force=1` (ignore the Monday/already-sent guards),
+    `dry_run=1` (build only), `wait=1` (block and return the full report),
+    `limit=N`, `username=a&username=b`.
+    """
+    if not _digest_trigger_authorized(request):
+        return JsonResponse({"ok": False, "error": "unauthorized"}, status=401)
+
+    force = _flag(request, "force")
+    dry_run = _flag(request, "dry_run")
+    usernames = [name for name in request.GET.getlist("username") if name.strip()]
+    try:
+        limit = int(request.GET.get("limit")) if request.GET.get("limit") else None
+    except ValueError:
+        return JsonResponse({"ok": False, "error": "invalid_limit"}, status=400)
+
+    kwargs = {
+        "usernames": usernames,
+        "force": force,
+        "dry_run": dry_run,
+        "limit": limit,
+        "require_digest_day": not force,
+    }
+
+    if not force and not is_digest_day():
+        return JsonResponse(
+            {
+                "ok": True,
+                "started": False,
+                "week_start": week_start_for().isoformat(),
+                "detail": "Weekly digests are sent on Mondays (UTC). Pass force=1 to override.",
+            }
+        )
+
+    # Matching every user runs the LLM pipeline, so the default is fire-and-forget
+    # to keep the caller (n8n HTTP Request) from timing out.
+    if not _flag(request, "wait"):
+        def _run() -> None:
+            try:
+                send_weekly_digests(**kwargs)
+            except Exception:
+                logger.exception("Background weekly digest run failed")
+            finally:
+                connection.close()
+
+        threading.Thread(target=_run, name="weekly-digest-run", daemon=True).start()
+        return JsonResponse(
+            {
+                "ok": True,
+                "started": True,
+                "mode": "background",
+                "week_start": week_start_for().isoformat(),
+                "detail": "Digest run started; each user's payload is POSTed to the n8n webhook.",
+            },
+            status=202,
+        )
+
+    try:
+        report = send_weekly_digests(**kwargs)
+    except DigestConfigError as exc:
+        return JsonResponse(
+            {"ok": False, "error": "webhook_not_configured", "detail": str(exc)},
+            status=503,
+        )
+    except Exception:
+        logger.exception("Weekly digest run failed")
+        return JsonResponse({"ok": False, "error": "digest_failed"}, status=500)
+
+    return JsonResponse({"ok": True, "started": True, **_strip_payloads(report)})

@@ -609,12 +609,20 @@ def _neutral_rows(matches: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return _attach_display_fields(prepared)
 
 
+# Chat keeps a compact board; digests can ask for a higher `result_limit`.
+DEFAULT_RESULT_LIMIT = 12
+DEFAULT_CANDIDATE_LIMIT = 18
+
+
 def _merge_score_rows(
     matches: list[dict[str, Any]],
     candidates: list[dict[str, Any]],
     score_rows: list[Any],
+    *,
+    result_limit: int = DEFAULT_RESULT_LIMIT,
 ) -> list[dict[str, Any]]:
     """Apply structured score rows onto candidate grants."""
+    limit = max(1, int(result_limit or DEFAULT_RESULT_LIMIT))
     by_index: dict[int, dict[str, Any]] = {}
     for item in score_rows:
         if isinstance(item, GrantScoreRow):
@@ -629,7 +637,7 @@ def _merge_score_rows(
         by_index[idx] = item
 
     if not by_index:
-        return _attach_display_fields(candidates[:12])
+        return _attach_display_fields(candidates[:limit])
 
     rescored: list[dict[str, Any]] = []
     for i, row in enumerate(candidates):
@@ -662,12 +670,15 @@ def _merge_score_rows(
     if len(matches) > len(candidates):
         rescored.extend(_neutral_rows(matches[len(candidates) :]))
 
-    return _attach_display_fields(_rank_by_chance(rescored)[:12])
+    return _attach_display_fields(_rank_by_chance(rescored)[:limit])
 
 
 async def _apply_ai_scores_async(
     matches: list[dict[str, Any]],
     context: dict[str, Any],
+    *,
+    result_limit: int = DEFAULT_RESULT_LIMIT,
+    candidate_limit: int = DEFAULT_CANDIDATE_LIMIT,
 ) -> list[dict[str, Any]]:
     """
     AI-only scoring via Agents SDK (preferred) against active search criteria.
@@ -675,9 +686,11 @@ async def _apply_ai_scores_async(
     """
     if not matches:
         return matches
-    baseline = _neutral_rows(list(matches)[:18])
+    limit = max(1, int(result_limit or DEFAULT_RESULT_LIMIT))
+    pool = max(limit, int(candidate_limit or DEFAULT_CANDIDATE_LIMIT))
+    baseline = _neutral_rows(list(matches)[:pool])
     if not _ai_scoring_enabled():
-        return _attach_display_fields(_rank_by_chance(baseline)[:12])
+        return _attach_display_fields(_rank_by_chance(baseline)[:limit])
 
     criteria = scoring_criteria(context if isinstance(context, dict) else {})
     candidates = list(baseline)
@@ -719,9 +732,13 @@ async def _apply_ai_scores_async(
         result = await Runner.run(scoring_agent, score_prompt, max_turns=4)
         final = result.final_output
         if isinstance(final, GrantScoreResult) and final.scores:
-            return _merge_score_rows(matches, candidates, final.scores)
+            return _merge_score_rows(
+                matches, candidates, final.scores, result_limit=limit
+            )
         if isinstance(final, dict) and final.get("scores"):
-            return _merge_score_rows(matches, candidates, final["scores"])
+            return _merge_score_rows(
+                matches, candidates, final["scores"], result_limit=limit
+            )
         logger.warning("Scoring agent returned no scores; trying AsyncOpenAI fallback")
     except Exception:
         logger.exception("Agents SDK scoring failed; trying AsyncOpenAI fallback")
@@ -767,34 +784,64 @@ async def _apply_ai_scores_async(
         score_rows = data.get("scores") if isinstance(data, dict) else None
         if not isinstance(score_rows, list) or not score_rows:
             logger.warning("AI scorer returned no scores; using unscored order")
-            return _attach_display_fields(baseline[:12])
-        return _merge_score_rows(matches, candidates, score_rows)
+            return _attach_display_fields(baseline[:limit])
+        return _merge_score_rows(
+            matches, candidates, score_rows, result_limit=limit
+        )
     except Exception:
         logger.exception("AI grant scoring failed; using unscored order")
-        return _attach_display_fields(baseline[:12])
+        return _attach_display_fields(baseline[:limit])
 
 
 def _apply_ai_scores(
     matches: list[dict[str, Any]],
     context: dict[str, Any],
+    *,
+    result_limit: int = DEFAULT_RESULT_LIMIT,
+    candidate_limit: int = DEFAULT_CANDIDATE_LIMIT,
 ) -> list[dict[str, Any]]:
     """Sync bridge for AI scoring."""
-    return _run_async(_apply_ai_scores_async(matches, context))
+    return _run_async(
+        _apply_ai_scores_async(
+            matches,
+            context,
+            result_limit=result_limit,
+            candidate_limit=candidate_limit,
+        )
+    )
 
 
 def _finalize_ranked_matches(
     matches: list[dict[str, Any]],
     context: dict[str, Any],
+    *,
+    result_limit: int = DEFAULT_RESULT_LIMIT,
 ) -> list[dict[str, Any]]:
     """AI scoring only, against query/effective search criteria."""
-    return _apply_ai_scores(list(matches)[:18], context)
+    limit = max(1, int(result_limit or DEFAULT_RESULT_LIMIT))
+    pool = max(limit, DEFAULT_CANDIDATE_LIMIT)
+    return _apply_ai_scores(
+        list(matches)[:pool],
+        context,
+        result_limit=limit,
+        candidate_limit=pool,
+    )
 
 
 async def _finalize_ranked_matches_async(
     matches: list[dict[str, Any]],
     context: dict[str, Any],
+    *,
+    result_limit: int = DEFAULT_RESULT_LIMIT,
 ) -> list[dict[str, Any]]:
-    return await _apply_ai_scores_async(list(matches)[:18], context)
+    limit = max(1, int(result_limit or DEFAULT_RESULT_LIMIT))
+    pool = max(limit, DEFAULT_CANDIDATE_LIMIT)
+    return await _apply_ai_scores_async(
+        list(matches)[:pool],
+        context,
+        result_limit=limit,
+        candidate_limit=pool,
+    )
 
 
 def _merge_source_details(
@@ -834,6 +881,8 @@ def _source_coroutines(
     profile: Any,
     user_query: str = "",
     context: dict[str, Any] | None = None,
+    *,
+    result_limit: int = DEFAULT_RESULT_LIMIT,
 ) -> dict[str, Callable[[], Awaitable[list[dict[str, Any]]]]]:
     """Build async source fetchers (native async HTTP clients)."""
     from services.granted_ai import search_grants_async
@@ -846,6 +895,11 @@ def _source_coroutines(
     state = payload.get("location_state") or ""
     priority = payload.get("priority_area") or ""
     org_type = payload.get("org_type") or ""
+    # Digests ask for larger boards — pull a wider source pool to fill them.
+    wide = max(1, int(result_limit or DEFAULT_RESULT_LIMIT)) > DEFAULT_RESULT_LIMIT
+    gov_rows = 30 if wide else 15
+    usa_limit = 20 if wide else 10
+    granted_limit = 25 if wide else 10
 
     async def _gov() -> list[dict[str, Any]]:
         try:
@@ -854,7 +908,7 @@ def _source_coroutines(
                 priority_area=priority,
                 location_city=city,
                 location_state=state,
-                rows=15,
+                rows=gov_rows,
             )
             return _compact(results, "grants_gov")
         except Exception:
@@ -868,7 +922,7 @@ def _source_coroutines(
                 priority_area=priority,
                 location_city=city,
                 location_state=state,
-                limit=10,
+                limit=usa_limit,
             )
             return _compact(results, "usaspending")
         except Exception:
@@ -883,7 +937,7 @@ def _source_coroutines(
                 location_city=city,
                 location_state=state,
                 org_type=org_type,
-                limit=10,
+                limit=granted_limit,
             )
             return _compact(results, "granted_ai")
         except Exception:
@@ -905,9 +959,16 @@ async def fetch_all_sources_async(
     profile: Any,
     user_query: str = "",
     context: dict[str, Any] | None = None,
+    *,
+    result_limit: int = DEFAULT_RESULT_LIMIT,
 ) -> dict[str, list[dict[str, Any]]]:
     """Fetch all source APIs concurrently via asyncio.gather (no ThreadPoolExecutor)."""
-    jobs = _source_coroutines(profile, user_query=user_query, context=context)
+    jobs = _source_coroutines(
+        profile,
+        user_query=user_query,
+        context=context,
+        result_limit=result_limit,
+    )
     names = list(jobs.keys())
     results = await asyncio.gather(
         *(jobs[name]() for name in names),
@@ -1307,6 +1368,7 @@ def _score_merge(
     profile: dict[str, Any] | Any | None = None,
     *,
     ai_priority: bool = True,
+    result_limit: int = DEFAULT_RESULT_LIMIT,
 ) -> list[dict[str, Any]]:
     """
     Merge sources, then AI-score against query/effective search criteria.
@@ -1316,6 +1378,9 @@ def _score_merge(
         context = _search_context(profile, "")
     else:
         context = profile or {}
+
+    limit = max(1, int(result_limit or DEFAULT_RESULT_LIMIT))
+    pool = max(limit, DEFAULT_CANDIDATE_LIMIT)
 
     merged: list[dict[str, Any]] = []
     merged.extend(
@@ -1336,10 +1401,10 @@ def _score_merge(
             default_reason="GrantedAI opportunity matching your focus and location.",
         )
     )
-    merged = merged[:18]
+    merged = merged[:pool]
     if ai_priority:
-        return _finalize_ranked_matches(merged, context)
-    return _neutral_rows(merged)[:12]
+        return _finalize_ranked_matches(merged, context, result_limit=limit)
+    return _neutral_rows(merged)[:limit]
 
 
 def build_grant_agent(defaults: dict[str, Any] | None = None):
@@ -1372,17 +1437,25 @@ def build_grant_agent(defaults: dict[str, Any] | None = None):
 
 
 async def run_grant_matching_agent_async(
-    profile: Any, user_query: str = ""
+    profile: Any,
+    user_query: str = "",
+    *,
+    max_results: int | None = None,
 ) -> list[dict[str, Any]]:
     """
     Async matching: Agents SDK tools first, asyncio.gather fallback.
     Profile defaults apply unless user_query overrides specific fields.
+    `max_results` caps the final ranked list (chat default 12; digests may raise it).
     """
     payload = _search_context(profile, user_query)
+    limit = max(1, int(max_results or DEFAULT_RESULT_LIMIT))
 
     async def _fallback() -> list[dict[str, Any]]:
         sources = await fetch_all_sources_async(
-            profile, user_query=user_query, context=payload
+            profile,
+            user_query=user_query,
+            context=payload,
+            result_limit=limit,
         )
         return await _finalize_ranked_matches_async(
             _score_merge(
@@ -1391,8 +1464,10 @@ async def run_grant_matching_agent_async(
                 sources["granted_ai"],
                 profile=payload,
                 ai_priority=False,
+                result_limit=limit,
             ),
             payload,
+            result_limit=limit,
         )
 
     if not _agent_enabled():
@@ -1423,38 +1498,69 @@ async def run_grant_matching_agent_async(
         needed = {"grants_gov", "usaspending", "granted_ai"}
         if not needed.issubset(used):
             sources = await fetch_all_sources_async(
-                profile, user_query=user_query, context=payload
+                profile,
+                user_query=user_query,
+                context=payload,
+                result_limit=limit,
             )
             matches = _merge_source_details(matches, sources)
             extras: list[dict[str, Any]] = []
+            # Keep more extras when the caller asks for a larger digest board.
+            extra_each = max(4, min(10, limit // 3 or 4))
             if sources["granted_ai"] and "granted_ai" not in used:
                 extras.extend(
                     _score_merge(
-                        [], [], sources["granted_ai"], profile=payload, ai_priority=False
-                    )[:4]
+                        [],
+                        [],
+                        sources["granted_ai"],
+                        profile=payload,
+                        ai_priority=False,
+                        result_limit=extra_each,
+                    )[:extra_each]
                 )
             if sources["usaspending"] and "usaspending" not in used:
                 extras.extend(
                     _score_merge(
-                        [], sources["usaspending"], [], profile=payload, ai_priority=False
-                    )[:4]
+                        [],
+                        sources["usaspending"],
+                        [],
+                        profile=payload,
+                        ai_priority=False,
+                        result_limit=extra_each,
+                    )[:extra_each]
                 )
             if sources["grants_gov"] and "grants_gov" not in used:
                 extras.extend(
                     _score_merge(
-                        sources["grants_gov"], [], [], profile=payload, ai_priority=False
-                    )[:4]
+                        sources["grants_gov"],
+                        [],
+                        [],
+                        profile=payload,
+                        ai_priority=False,
+                        result_limit=extra_each,
+                    )[:extra_each]
                 )
             if extras:
                 matches.extend(extras)
                 matches.sort(key=lambda m: float(m.get("score") or 0), reverse=True)
 
-        return await _finalize_ranked_matches_async(matches, payload)
+        return await _finalize_ranked_matches_async(
+            matches, payload, result_limit=limit
+        )
     except Exception:
         logger.exception("Grant agent failed; using async merged fallback")
         return await _fallback()
 
 
-def run_grant_matching_agent(profile: Any, user_query: str = "") -> list[dict[str, Any]]:
-    """Sync bridge for /home/matches/ JSON endpoint."""
-    return _run_async(run_grant_matching_agent_async(profile, user_query=user_query))
+def run_grant_matching_agent(
+    profile: Any,
+    user_query: str = "",
+    *,
+    max_results: int | None = None,
+) -> list[dict[str, Any]]:
+    """Sync bridge for /home/matches/ JSON endpoint and weekly digests."""
+    return _run_async(
+        run_grant_matching_agent_async(
+            profile, user_query=user_query, max_results=max_results
+        )
+    )

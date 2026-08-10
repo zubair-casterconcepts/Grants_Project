@@ -201,6 +201,36 @@ html.is-page-loading body {
   font-size: 0.82rem;
 }
 
+.field-hint {
+  color: #8a877e;
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+
+/* Checkbox rows opt out of the full-width input styling. */
+.field-check {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  cursor: pointer;
+}
+
+.field-check input[type="checkbox"] {
+  width: 1.05rem;
+  height: 1.05rem;
+  padding: 0;
+  flex-shrink: 0;
+  accent-color: var(--dash-green);
+}
+
+.field-check span {
+  font-size: 0.9rem;
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--dash-ink);
+}
+
 .btn-primary,
 .btn-ghost {
   font: inherit;

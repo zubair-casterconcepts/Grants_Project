@@ -48,13 +48,26 @@
         {% endif %}
 
         {% for field in account_form %}
-          <label class="field">
-            <span>{{ field.label }}</span>
-            {{ field }}
+          {% if field.field.widget.input_type == "checkbox" %}
+            <label class="field field-check">
+              {{ field }}
+              <span>{{ field.label }}</span>
+            </label>
             {% if field.errors %}
               <small class="field-error">{{ field.errors|striptags }}</small>
             {% endif %}
-          </label>
+          {% else %}
+            <label class="field">
+              <span>{{ field.label }}</span>
+              {{ field }}
+              {% if field.help_text %}
+                <small class="field-hint">{{ field.help_text }}</small>
+              {% endif %}
+              {% if field.errors %}
+                <small class="field-error">{{ field.errors|striptags }}</small>
+              {% endif %}
+            </label>
+          {% endif %}
         {% endfor %}
 
         <button type="submit" class="btn-primary">Update profile</button>

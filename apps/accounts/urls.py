@@ -14,4 +14,5 @@ urlpatterns = [
     path("saved/", views.saved_grants_view, name="saved_grants"),
     path("saved/add/", views.save_grant_view, name="save_grant"),
     path("saved/<int:saved_id>/remove/", views.unsave_grant_view, name="unsave_grant"),
+    path("digest/run/", views.run_weekly_digests_view, name="run_weekly_digests"),
 ]

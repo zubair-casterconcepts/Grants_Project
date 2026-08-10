@@ -1,0 +1,27 @@
+{{ site_name }} — weekly grant matches
+Week of {{ week_label }}
+
+Hi {{ user_name }}, {{ summary.headline|lower }}.
+
+Matched on your profile:{% if profile.priority_area %} {{ profile.priority_area }} ·{% endif %}{% if profile.location_label %} {{ profile.location_label }} ·{% endif %}{% if profile.budget_label %} {{ profile.budget_label }} ·{% endif %}{% if profile.org_type_label %} {{ profile.org_type_label }}{% endif %}
+{% if profile.title %}Project: {{ profile.title }}{% endif %}
+{% for grant in grants %}
+{{ grant.rank }}. {{ grant.title }}
+   Score {{ grant.score }}{% if grant.chance_label %} ({{ grant.chance_label }}){% endif %} · {{ grant.category }} · {{ grant.source_label }}
+{% if grant.agency %}   Provided by: {{ grant.agency }}
+{% endif %}   Amount: {{ grant.amount|default:"Not stated" }}
+   Deadline: {{ grant.deadline_label }}
+{% if grant.reason %}   Why: {{ grant.reason }}
+{% endif %}{% if grant.url %}   {{ grant.url }}
+{% endif %}{% empty %}
+No new matches cleared the bar for your current profile this week.
+Widening your focus area or budget usually surfaces more options:
+{{ links.settings }}
+{% endfor %}
+--
+Chat: {{ links.app }}
+Saved grants: {{ links.saved }}
+Project settings: {{ links.settings }}
+
+You get this every Monday because weekly matches are on for your account.
+Turn it off any time in profile settings: {{ links.profile }}

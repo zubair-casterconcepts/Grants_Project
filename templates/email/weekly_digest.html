@@ -1,0 +1,203 @@
+{% autoescape on %}<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>{{ site_name }} — weekly grant matches</title>
+</head>
+<body style="margin:0; padding:0; background:#f6f5f1; -webkit-font-smoothing:antialiased;">
+  <div style="display:none; font-size:1px; color:#f6f5f1; line-height:1px; max-height:0; max-width:0; opacity:0; overflow:hidden;">{{ preheader }}</div>
+
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f6f5f1; padding:24px 12px;">
+    <tr>
+      <td align="center">
+        <table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" style="width:600px; max-width:600px;">
+
+          <!-- Header -->
+          <tr>
+            <td style="padding:0 4px 14px 4px; font-family:Helvetica,Arial,sans-serif;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+                <tr>
+                  <td style="font-family:Georgia,'Times New Roman',serif; font-size:20px; font-weight:700; color:#2f4f3f; letter-spacing:-0.2px;">
+                    {{ site_name }}
+                  </td>
+                  <td align="right" style="font-size:12px; color:#6f6d66;">
+                    Week of {{ week_label }}
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+          <!-- Hero -->
+          <tr>
+            <td style="background:#2f4f3f; border-radius:16px; padding:26px 26px 22px 26px; font-family:Helvetica,Arial,sans-serif; color:#ffffff;">
+              <p style="margin:0 0 6px 0; font-size:12px; letter-spacing:0.08em; text-transform:uppercase; color:#b9cfc2;">Your weekly grant digest</p>
+              <h1 style="margin:0 0 10px 0; font-family:Georgia,'Times New Roman',serif; font-size:25px; line-height:1.25; font-weight:600; color:#ffffff;">
+                Hi {{ user_name }}, {{ summary.headline|lower }}.
+              </h1>
+              <p style="margin:0; font-size:14px; line-height:1.6; color:#d7e3db;">
+                Fresh from Grants.gov, USASpending and GrantedAI, ranked against your saved project profile.
+              </p>
+
+              <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin-top:18px;">
+                <tr>
+                  <td style="background:rgba(255,255,255,0.12); border-radius:10px; padding:10px 14px; font-family:Helvetica,Arial,sans-serif;">
+                    <div style="font-size:20px; font-weight:700; color:#ffffff;">{{ summary.match_count }}</div>
+                    <div style="font-size:11px; color:#c8d8ce; letter-spacing:0.04em; text-transform:uppercase;">Matches</div>
+                  </td>
+                  <td style="width:8px;">&nbsp;</td>
+                  <td style="background:rgba(255,255,255,0.12); border-radius:10px; padding:10px 14px; font-family:Helvetica,Arial,sans-serif;">
+                    <div style="font-size:20px; font-weight:700; color:#ffffff;">{{ summary.high_chance }}</div>
+                    <div style="font-size:11px; color:#c8d8ce; letter-spacing:0.04em; text-transform:uppercase;">High chance</div>
+                  </td>
+                  <td style="width:8px;">&nbsp;</td>
+                  <td style="background:rgba(255,255,255,0.12); border-radius:10px; padding:10px 14px; font-family:Helvetica,Arial,sans-serif;">
+                    <div style="font-size:20px; font-weight:700; color:#ffffff;">{{ summary.top_score }}</div>
+                    <div style="font-size:11px; color:#c8d8ce; letter-spacing:0.04em; text-transform:uppercase;">Top score</div>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+          <!-- Profile recap -->
+          <tr>
+            <td style="padding:16px 4px 6px 4px; font-family:Helvetica,Arial,sans-serif;">
+              <p style="margin:0 0 8px 0; font-size:11px; letter-spacing:0.06em; text-transform:uppercase; color:#8a877e; font-weight:700;">Matched on your profile</p>
+              <table role="presentation" cellpadding="0" cellspacing="0" border="0">
+                <tr>
+                  {% if profile.priority_area %}<td style="padding:0 6px 6px 0;"><span style="display:inline-block; background:#f4efe6; border:1px solid #e0d3bd; border-radius:999px; padding:5px 11px; font-size:12px; color:#7a5f34; font-weight:600;">{{ profile.priority_area }}</span></td>{% endif %}
+                  {% if profile.location_label %}<td style="padding:0 6px 6px 0;"><span style="display:inline-block; background:#ffffff; border:1px solid #e6e4de; border-radius:999px; padding:5px 11px; font-size:12px; color:#4a4842;">{{ profile.location_label }}</span></td>{% endif %}
+                  {% if profile.budget_label %}<td style="padding:0 6px 6px 0;"><span style="display:inline-block; background:#ffffff; border:1px solid #e6e4de; border-radius:999px; padding:5px 11px; font-size:12px; color:#4a4842;">{{ profile.budget_label }}</span></td>{% endif %}
+                  {% if profile.org_type_label %}<td style="padding:0 6px 6px 0;"><span style="display:inline-block; background:#ffffff; border:1px solid #e6e4de; border-radius:999px; padding:5px 11px; font-size:12px; color:#4a4842;">{{ profile.org_type_label }}</span></td>{% endif %}
+                </tr>
+              </table>
+              {% if profile.title %}
+                <p style="margin:6px 0 0 0; font-size:13px; color:#6f6d66; line-height:1.5;">Project: <strong style="color:#1c1c1a; font-weight:600;">{{ profile.title }}</strong></p>
+              {% endif %}
+            </td>
+          </tr>
+
+          <!-- Grants -->
+          {% for grant in grants %}
+            <tr>
+              <td style="padding:10px 0 0 0;">
+                <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#ffffff; border:1px solid #e6e4de; border-radius:14px;">
+                  <tr>
+                    <td style="padding:18px 20px; font-family:Helvetica,Arial,sans-serif;">
+
+                      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+                        <tr>
+                          <td width="44" valign="top" style="padding-right:12px;">
+                            <div style="width:40px; height:40px; line-height:40px; text-align:center; border-radius:12px; font-size:14px; font-weight:700; {% if grant.chance_tier == 'high' %}background:#eef5f1; border:1px solid #b9d0c4; color:#2d5046;{% elif grant.chance_tier == 'medium' %}background:#faf6ec; border:1px solid #e2d4b4; color:#6a5530;{% else %}background:#f3f3f3; border:1px solid #d5d5d5; color:#5f5f5f;{% endif %}">
+                              {{ grant.score }}
+                            </div>
+                          </td>
+                          <td valign="top">
+                            <h2 style="margin:0 0 8px 0; font-family:Georgia,'Times New Roman',serif; font-size:17px; line-height:1.35; font-weight:600; color:#1c1c1a;">
+                              {% if grant.url %}
+                                <a href="{{ grant.url }}" style="color:#1c1c1a; text-decoration:none;">{{ grant.title }}</a>
+                              {% else %}
+                                {{ grant.title }}
+                              {% endif %}
+                            </h2>
+
+                            <table role="presentation" cellpadding="0" cellspacing="0" border="0">
+                              <tr>
+                                <td style="padding:0 5px 8px 0;"><span style="display:inline-block; background:#f7f2e8; border:1px solid #ddd3c0; border-radius:999px; padding:3px 9px; font-size:11px; font-weight:700; color:#7a5f34;">{{ grant.category }}</span></td>
+                                {% if grant.chance_label %}
+                                  <td style="padding:0 5px 8px 0;"><span style="display:inline-block; border-radius:999px; padding:3px 9px; font-size:11px; font-weight:700; {% if grant.chance_tier == 'high' %}background:#eef5f1; border:1px solid #b9d0c4; color:#2d5046;{% elif grant.chance_tier == 'medium' %}background:#faf6ec; border:1px solid #e2d4b4; color:#6a5530;{% else %}background:#f5f5f5; border:1px solid #d9d9d9; color:#6b6b6b;{% endif %}">{{ grant.chance_label }}</span></td>
+                                {% endif %}
+                                <td style="padding:0 5px 8px 0;"><span style="display:inline-block; background:#fafaf8; border:1px solid #e6e4de; border-radius:999px; padding:3px 9px; font-size:11px; font-weight:600; color:#7a776e;">{{ grant.source_label }}</span></td>
+                              </tr>
+                            </table>
+
+                            {% if grant.agency %}
+                              <p style="margin:0 0 8px 0; font-size:13px; color:#4a4842; line-height:1.5;">
+                                <span style="color:#8a877e;">Provided by</span> <strong style="font-weight:600;">{{ grant.agency }}</strong>
+                              </p>
+                            {% endif %}
+
+                            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 10px 0;">
+                              <tr>
+                                <td style="padding:8px 10px; background:#f8f7f4; border-radius:8px; font-size:12px; color:#4a4842;">
+                                  <span style="color:#8a877e;">Amount</span><br>
+                                  <strong style="font-weight:600;">{{ grant.amount|default:"Not stated" }}</strong>
+                                </td>
+                                <td style="width:8px;">&nbsp;</td>
+                                <td style="padding:8px 10px; background:#f8f7f4; border-radius:8px; font-size:12px; color:#4a4842;">
+                                  <span style="color:#8a877e;">Deadline</span><br>
+                                  <strong style="font-weight:600;">{{ grant.deadline_label }}</strong>
+                                </td>
+                              </tr>
+                            </table>
+
+                            {% if grant.reason %}
+                              <p style="margin:0 0 12px 0; font-size:13px; color:#6f6d66; line-height:1.55;">{{ grant.reason }}</p>
+                            {% endif %}
+
+                            {% if grant.url %}
+                              <a href="{{ grant.url }}" style="display:inline-block; background:#2f4f3f; color:#ffffff; text-decoration:none; font-size:13px; font-weight:600; padding:9px 18px; border-radius:9px;">View opportunity</a>
+                            {% endif %}
+                          </td>
+                        </tr>
+                      </table>
+
+                    </td>
+                  </tr>
+                </table>
+              </td>
+            </tr>
+          {% empty %}
+            <tr>
+              <td style="padding:10px 0 0 0;">
+                <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#ffffff; border:1px solid #e6e4de; border-radius:14px;">
+                  <tr>
+                    <td style="padding:26px; font-family:Helvetica,Arial,sans-serif; text-align:center;">
+                      <p style="margin:0 0 8px 0; font-family:Georgia,'Times New Roman',serif; font-size:17px; color:#1c1c1a;">No new matches this week</p>
+                      <p style="margin:0 0 16px 0; font-size:13px; color:#6f6d66; line-height:1.6;">
+                        Nothing cleared the bar for your current profile. Widening your focus area or budget usually surfaces more options.
+                      </p>
+                      <a href="{{ links.settings }}" style="display:inline-block; background:#2f4f3f; color:#ffffff; text-decoration:none; font-size:13px; font-weight:600; padding:9px 18px; border-radius:9px;">Update my project</a>
+                    </td>
+                  </tr>
+                </table>
+              </td>
+            </tr>
+          {% endfor %}
+
+          <!-- CTA -->
+          {% if grants %}
+            <tr>
+              <td style="padding:18px 4px 0 4px; text-align:center; font-family:Helvetica,Arial,sans-serif;">
+                <a href="{{ links.app }}" style="display:inline-block; background:#ffffff; border:1px solid #c4a67a; color:#7a5f34; text-decoration:none; font-size:13px; font-weight:700; padding:11px 22px; border-radius:10px;">Open {{ site_name }} to search more</a>
+              </td>
+            </tr>
+          {% endif %}
+
+          <!-- Footer -->
+          <tr>
+            <td style="padding:22px 8px 6px 8px; font-family:Helvetica,Arial,sans-serif; text-align:center;">
+              <p style="margin:0 0 8px 0; font-size:12px; color:#8a877e; line-height:1.6;">
+                <a href="{{ links.app }}" style="color:#6f6d66; text-decoration:none;">Chat</a>
+                &nbsp;·&nbsp;
+                <a href="{{ links.saved }}" style="color:#6f6d66; text-decoration:none;">Saved grants</a>
+                &nbsp;·&nbsp;
+                <a href="{{ links.settings }}" style="color:#6f6d66; text-decoration:none;">Project settings</a>
+              </p>
+              <p style="margin:0; font-size:11px; color:#a3a099; line-height:1.6;">
+                You get this every Monday because weekly matches are on for your account.<br>
+                Turn it off any time in <a href="{{ links.profile }}" style="color:#a3a099;">profile settings</a>.
+              </p>
+            </td>
+          </tr>
+
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>
+{% endautoescape %}

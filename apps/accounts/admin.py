@@ -1,7 +1,15 @@
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin as DjangoUserAdmin
 
-from .models import Conversation, GrantUser, Message, Profile, SavedGrant, StarterPrompt
+from .models import (
+    Conversation,
+    GrantUser,
+    Message,
+    Profile,
+    SavedGrant,
+    StarterPrompt,
+    WeeklyDigestLog,
+)
 
 
 class ProfileInline(admin.StackedInline):
@@ -21,6 +29,7 @@ class ProfileInline(admin.StackedInline):
         "org_type",
         "budget_requested",
         "eligibility_notes",
+        "weekly_digest_enabled",
         "onboarding_completed",
     )
 
@@ -46,7 +55,13 @@ class ProfileAdmin(admin.ModelAdmin):
         "onboarding_completed",
         "updated_at",
     )
-    list_filter = ("onboarding_completed", "priority_area", "org_type", "location_state")
+    list_filter = (
+        "onboarding_completed",
+        "weekly_digest_enabled",
+        "priority_area",
+        "org_type",
+        "location_state",
+    )
     search_fields = (
         "user__username",
         "user__email",
@@ -63,6 +78,23 @@ class SavedGrantAdmin(admin.ModelAdmin):
     list_filter = ("source", "created_at")
     search_fields = ("title", "agency", "number", "external_id", "user__username")
     autocomplete_fields = ("user",)
+
+
+@admin.register(WeeklyDigestLog)
+class WeeklyDigestLogAdmin(admin.ModelAdmin):
+    list_display = (
+        "user",
+        "week_start",
+        "status",
+        "email",
+        "match_count",
+        "webhook_status",
+        "updated_at",
+    )
+    list_filter = ("status", "week_start")
+    search_fields = ("user__username", "email", "detail")
+    autocomplete_fields = ("user",)
+    readonly_fields = ("created_at", "updated_at")
 
 
 class MessageInline(admin.TabularInline):

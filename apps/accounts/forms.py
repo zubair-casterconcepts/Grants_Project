@@ -15,12 +15,21 @@ STATE_CHOICES = [("", "Select state")] + [
 class ProfileAccountForm(forms.ModelForm):
     """Account/profile identity fields (not used for grant tool matching)."""
 
+    email = forms.EmailField(
+        required=False,
+        label="Email address",
+        widget=forms.EmailInput(attrs={"placeholder": "you@organization.org"}),
+        help_text="Where your Monday grant digest is delivered.",
+    )
+
     class Meta:
         model = Profile
         fields = (
             "organization",
             "role_title",
+            "weekly_digest_enabled",
         )
+        labels = {"weekly_digest_enabled": "Email me matching grants every Monday"}
         widgets = {
             "organization": forms.TextInput(attrs={"placeholder": "Organization name"}),
             "role_title": forms.TextInput(attrs={"placeholder": "Your role"}),
@@ -30,6 +39,31 @@ class ProfileAccountForm(forms.ModelForm):
         super().__init__(*args, **kwargs)
         self.fields["organization"].required = True
         self.fields["role_title"].required = False
+        user = self._user()
+        if user is not None and not self.is_bound:
+            self.fields["email"].initial = user.email
+
+    def _user(self):
+        return self.instance.user if getattr(self.instance, "user_id", None) else None
+
+    def clean(self):
+        cleaned = super().clean()
+        if cleaned.get("weekly_digest_enabled") and not (cleaned.get("email") or "").strip():
+            self.add_error(
+                "email",
+                "Add an email address so we know where to send your weekly matches.",
+            )
+        return cleaned
+
+    def save(self, commit=True):
+        profile = super().save(commit=commit)
+        user = self._user()
+        email = (self.cleaned_data.get("email") or "").strip()
+        if user is not None and email != (user.email or ""):
+            user.email = email
+            if commit:
+                user.save(update_fields=["email"])
+        return profile
 
 
 class PasswordUpdateForm(DjangoPasswordChangeForm):
