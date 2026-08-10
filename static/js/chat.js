@@ -1373,10 +1373,8 @@
           return;
         }
         if (type === "source") {
+          // Keep one loader while sources finish in parallel; render only on done.
           await setStatus(event.message || "Still searching…");
-          const placeText = placeTextFrom(event.location || {});
-          await ensureResultsShell(placeText);
-          appendMatchCards(event.matches || []);
           if (typeof event.saved_count === "number") {
             updateSavedNavCount(event.saved_count);
           }
