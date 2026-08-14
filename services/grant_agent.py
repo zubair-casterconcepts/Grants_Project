@@ -19,6 +19,7 @@ import logging
 import os
 import re
 from collections.abc import AsyncIterator, Iterator
+from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Awaitable, Callable, TypeVar
@@ -40,6 +41,29 @@ T = TypeVar("T")
 
 _INSTRUCTIONS_PATH = Path(__file__).with_name("grant_agent_instructions.md")
 
+# Drop closed statuses and past deadlines; optionally drop undated rows whose
+# open_date is older than GRANT_MAX_OPEN_AGE_MONTHS (default 6).
+_CLOSED_STATUS_MARKERS = (
+    "closed",
+    "archived",
+    "inactive",
+    "cancelled",
+    "canceled",
+    "expired",
+)
+_DATE_FORMATS = (
+    "%Y-%m-%d",
+    "%m/%d/%Y",
+    "%m-%d-%Y",
+    "%b %d, %Y",
+    "%B %d, %Y",
+    "%d-%b-%Y",
+    "%Y/%m/%d",
+    "%m/%d/%y",
+    "%b %d %Y",
+    "%B %d %Y",
+)
+
 # Kept as a hard fallback so a missing instructions file never breaks matching.
 _DEFAULT_AGENT_INSTRUCTIONS = """# Grant Matching Agent
 
@@ -51,7 +75,7 @@ You are the Grants matching agent. Identify the strongest funding opportunities 
 2. Call grants_gov, usaspending, and granted_ai in the same turn so they can run concurrently.
 3. Pass keyword, priority_area, location_city, and location_state on every tool call.
 4. For granted_ai, also pass org_type from the profile when available.
-5. Keep relevant opportunities and rank by topic, category, location, then budget.
+5. Keep only currently open / future opportunities (drop past deadlines and closed/archived statuses), then rank by topic, category, location, then budget.
 6. Score each grant 0.0-1.0, set chance_percent to round(score * 100), and add a short reason.
 7. Set category to the grant's own subject area (Education, Arts, Health, Housing, etc.).
 8. Preserve provider fields from tools (agency, agency_address, contacts, amounts, dates).
@@ -60,6 +84,7 @@ You are the Grants matching agent. Identify the strongest funding opportunities 
 ## Rules
 
 - Do not invent opportunities, agencies, addresses, amounts, deadlines, or URLs.
+- Do not return opportunities whose deadline has already passed, or closed/archived statuses.
 - If one tool returns no results, continue with the other sources.
 """
 
@@ -250,6 +275,95 @@ def _compact(items: list[dict[str, Any]], source: str) -> list[dict[str, Any]]:
     from services.tools._normalize import compact_source_rows
 
     return compact_source_rows(items, source=source)
+
+
+def _parse_opportunity_date(value: Any) -> date | None:
+    """Best-effort parse of provider deadline/open dates. Returns None if unknown."""
+    if value in (None, ""):
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    text = str(value).strip()
+    if not text:
+        return None
+    # ISO / datetime prefixes: 2024-03-15 or 2024-03-15T00:00:00Z
+    head = text[:10]
+    if len(head) == 10 and head[4] == "-" and head[7] == "-":
+        try:
+            return date.fromisoformat(head)
+        except ValueError:
+            pass
+    # Strip ordinal suffixes: "March 15th, 2024"
+    cleaned = re.sub(r"(\d+)(st|nd|rd|th)\b", r"\1", text, flags=re.I)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    for candidate in (cleaned, cleaned.split("T", 1)[0].strip(), cleaned[:32]):
+        for fmt in _DATE_FORMATS:
+            try:
+                return datetime.strptime(candidate, fmt).date()
+            except ValueError:
+                continue
+    return None
+
+
+def _max_open_age_months() -> int:
+    raw = os.getenv("GRANT_MAX_OPEN_AGE_MONTHS", "6").strip()
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return 6
+
+
+def _is_closed_status(row: dict[str, Any]) -> bool:
+    status = str(row.get("opp_status") or "").strip().lower()
+    if not status:
+        return False
+    return any(marker in status for marker in _CLOSED_STATUS_MARKERS)
+
+
+def _is_actionable_opportunity(row: dict[str, Any], *, today: date | None = None) -> bool:
+    """
+    Keep currently open / future opportunities only.
+
+    - Closed/archived/expired statuses → drop
+    - Parseable deadline before today → drop (even if only days old)
+    - No deadline, but open_date older than GRANT_MAX_OPEN_AGE_MONTHS → drop
+    - No usable dates → keep (avoid over-filtering unknown formats)
+    """
+    if _is_closed_status(row):
+        return False
+
+    now = today or date.today()
+    deadline = _parse_opportunity_date(row.get("deadline"))
+    if deadline is not None:
+        return deadline >= now
+
+    months = _max_open_age_months()
+    if months <= 0:
+        return True
+    open_date = _parse_opportunity_date(row.get("open_date"))
+    if open_date is None:
+        return True
+    return open_date >= (now - timedelta(days=months * 30))
+
+
+def _filter_actionable_opportunities(
+    rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Drop past/closed opportunities before scoring or UI emission."""
+    if not rows:
+        return []
+    today = date.today()
+    kept = [row for row in rows if _is_actionable_opportunity(row, today=today)]
+    dropped = len(rows) - len(kept)
+    if dropped:
+        logger.info(
+            "Freshness filter removed %s stale/closed opportunities (%s kept)",
+            dropped,
+            len(kept),
+        )
+    return kept
 
 
 def _chance_tier(score: float) -> str:
@@ -820,8 +934,9 @@ def _finalize_ranked_matches(
     """AI scoring only, against query/effective search criteria."""
     limit = max(1, int(result_limit or DEFAULT_RESULT_LIMIT))
     pool = max(limit, DEFAULT_CANDIDATE_LIMIT)
+    fresh = _filter_actionable_opportunities(list(matches))
     return _apply_ai_scores(
-        list(matches)[:pool],
+        fresh[:pool],
         context,
         result_limit=limit,
         candidate_limit=pool,
@@ -836,8 +951,9 @@ async def _finalize_ranked_matches_async(
 ) -> list[dict[str, Any]]:
     limit = max(1, int(result_limit or DEFAULT_RESULT_LIMIT))
     pool = max(limit, DEFAULT_CANDIDATE_LIMIT)
+    fresh = _filter_actionable_opportunities(list(matches))
     return await _apply_ai_scores_async(
-        list(matches)[:pool],
+        fresh[:pool],
         context,
         result_limit=limit,
         candidate_limit=pool,
@@ -1256,6 +1372,7 @@ async def _aiter_agent_events(
         matches = [m.model_dump() for m in final_output.matches]
     elif isinstance(final_output, dict) and "matches" in final_output:
         matches = list(final_output.get("matches") or [])
+    matches = _filter_actionable_opportunities(matches)
 
     if not matches:
         matches = _score_merge(
@@ -1401,6 +1518,8 @@ def _score_merge(
             default_reason="GrantedAI opportunity matching your focus and location.",
         )
     )
+    # Drop past deadlines / closed statuses before the candidate pool is capped.
+    merged = _filter_actionable_opportunities(merged)
     merged = merged[:pool]
     if ai_priority:
         return _finalize_ranked_matches(merged, context, result_limit=limit)
@@ -1487,6 +1606,7 @@ async def run_grant_matching_agent_async(
             matches = [m.model_dump() for m in final.matches]
         elif isinstance(final, dict) and "matches" in final:
             matches = list(final.get("matches") or [])
+        matches = _filter_actionable_opportunities(matches)
 
         if not matches:
             logger.info("Agent returned no matches; using async fallback merge")

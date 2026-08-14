@@ -644,7 +644,8 @@ async def search_with_filters_async(
             hits = await _post_search2_async(active, retry)
 
         filtered = _filter_by_location(hits, subject)
-        normalized = [_normalize_hit(hit) for hit in filtered][:10]
+        # Keep a wider pre-enrich pool; freshness filtering happens in grant_agent.
+        normalized = [_normalize_hit(hit) for hit in filtered][:30]
         # Soft-enrich with full details (agency contact/address, awards, etc.).
         return await _enrich_hits_async(active, normalized)
 
