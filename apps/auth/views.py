@@ -9,11 +9,11 @@ from django.views.decorators.http import require_GET, require_http_methods, requ
 
 from apps.accounts.chat_services import (
     add_message,
-    apply_project_to_profile,
     conversation_to_dict,
     conversations_with_messages,
     create_conversation,
     message_to_dict,
+    sync_profile_to_user_projects,
     upsert_project_for_conversation,
 )
 from apps.accounts.forms import ProfileAccountForm, ProfileIntakeForm, STATE_CHOICES
@@ -410,6 +410,7 @@ def chat_profile_api(request):
         profile.ntee_code = profile.ntee_code or ""
         profile.onboarding_completed = True
         profile.save()
+        sync_profile_to_user_projects(profile)
     elif updates:
         from decimal import Decimal, InvalidOperation
 
@@ -438,6 +439,7 @@ def chat_profile_api(request):
         for key, value in updates.items():
             setattr(profile, key, value if value is not None else "")
         profile.save()
+        sync_profile_to_user_projects(profile)
 
     return JsonResponse({"ok": True, "bootstrap": _chat_bootstrap(profile)})
 
@@ -491,9 +493,9 @@ def conversation_detail_api(request, conversation_id: int):
         )
 
     profile = get_or_create_profile(request.user)
-    if conversation.project_id:
-        apply_project_to_profile(conversation.project, profile)
-        profile.refresh_from_db()
+    # Profile is the source of truth. Do not copy Project → Profile here:
+    # that was overwriting Settings (e.g. Detroit, MI) with stale chat snapshots
+    # (e.g. Texas, TX) whenever an old conversation was opened.
 
     messages = [
         message_to_dict(row)

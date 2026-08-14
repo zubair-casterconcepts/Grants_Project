@@ -26,6 +26,7 @@ from .forms import (
     StarterPromptForm,
 )
 from .models import SavedGrant, StarterPrompt
+from .chat_services import sync_profile_to_user_projects
 from .services import get_or_create_profile
 
 logger = logging.getLogger(__name__)
@@ -53,6 +54,8 @@ def settings_view(request):
             profile.ntee_code = profile.ntee_code or ""
             profile.onboarding_completed = True
             profile.save()
+            # Keep linked Project rows aligned so old chats cannot revive stale location.
+            sync_profile_to_user_projects(profile)
             messages.success(request, "Settings updated.")
             return redirect("accounts:settings")
     else:

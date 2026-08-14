@@ -78,6 +78,7 @@ CITY_STATE_HINTS = {
     "atlanta": "GA",
     "denver": "CO",
     "phoenix": "AZ",
+    "detroit": "MI",
 }
 
 

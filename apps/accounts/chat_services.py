@@ -69,19 +69,55 @@ def create_conversation(user, title: str = "New chat") -> Conversation:
 
 
 def apply_project_to_profile(project: Project, profile: Profile) -> Profile:
-    """Copy linked Project fields onto Profile so matching keeps using Profile."""
-    profile.title = project.title or profile.title
-    profile.description = project.description or profile.description
-    profile.priority_area = project.priority_area or profile.priority_area
-    profile.ntee_code = project.ntee_code or ""
-    profile.location_city = project.location_city or profile.location_city
-    profile.location_state = project.location_state or profile.location_state
-    profile.org_type = project.org_type or profile.org_type
-    profile.budget_requested = project.budget_requested
-    profile.eligibility_notes = project.eligibility_notes or ""
-    profile.onboarding_completed = True
-    profile.save()
+    """
+    Deprecated for write-back: Profile is the source of truth for settings.
+
+    Kept as a read-only helper that returns `profile` unchanged so older call
+    sites do not clobber Detroit/MI (etc.) with a stale Project snapshot.
+    """
     return profile
+
+
+def profile_matching_fields(profile: Profile) -> dict[str, Any]:
+    """Normalized Profile fields used for matching + Project snapshots."""
+    title = (profile.title or "").strip() or "Untitled project"
+    description = (profile.description or "").strip() or title
+    priority = (
+        (profile.priority_area or "").strip()
+        or Project.PriorityArea.COMMUNITY_DEVELOPMENT
+    )
+    city = (profile.location_city or "").strip() or "Unknown"
+    state = (profile.location_state or "").strip().upper()[:2] or "NY"
+    org_type = (profile.org_type or "").strip() or Project.OrgType.OTHER
+    budget = (
+        profile.budget_requested
+        if profile.budget_requested is not None
+        else Decimal("0")
+    )
+    return {
+        "title": title[:255],
+        "description": description,
+        "priority_area": priority,
+        "ntee_code": profile.ntee_code or "",
+        "location_city": city[:120],
+        "location_state": state,
+        "org_type": org_type,
+        "budget_requested": budget,
+        "eligibility_notes": profile.eligibility_notes or "",
+    }
+
+
+def sync_profile_to_user_projects(profile: Profile) -> int:
+    """
+    Push current Profile settings onto every Project owned by this user.
+
+    Prevents old chat Project rows from keeping stale city/state after Settings
+    is updated.
+    """
+    if not profile.onboarding_completed or not getattr(profile, "user_id", None):
+        return 0
+    fields = profile_matching_fields(profile)
+    return Project.objects.filter(user_id=profile.user_id).update(**fields)
 
 
 def upsert_project_for_conversation(
@@ -95,25 +131,7 @@ def upsert_project_for_conversation(
     if not profile.onboarding_completed:
         return conversation.project
 
-    title = (profile.title or "").strip() or "Untitled project"
-    description = (profile.description or "").strip() or title
-    priority = (profile.priority_area or "").strip() or Project.PriorityArea.COMMUNITY_DEVELOPMENT
-    city = (profile.location_city or "").strip() or "Unknown"
-    state = (profile.location_state or "").strip().upper()[:2] or "NY"
-    org_type = (profile.org_type or "").strip() or Project.OrgType.OTHER
-    budget = profile.budget_requested if profile.budget_requested is not None else Decimal("0")
-
-    fields = {
-        "title": title[:255],
-        "description": description,
-        "priority_area": priority,
-        "ntee_code": profile.ntee_code or "",
-        "location_city": city[:120],
-        "location_state": state,
-        "org_type": org_type,
-        "budget_requested": budget,
-        "eligibility_notes": profile.eligibility_notes or "",
-    }
+    fields = profile_matching_fields(profile)
 
     if conversation.project_id:
         project = conversation.project
