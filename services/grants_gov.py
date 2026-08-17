@@ -16,11 +16,14 @@ logger = logging.getLogger(__name__)
 
 SEARCH2_URL = "https://api.grants.gov/v1/api/search2"
 FETCH_OPPORTUNITY_URL = "https://api.grants.gov/v1/api/fetchOpportunity"
-REQUEST_TIMEOUT_SECONDS = 30
-DETAIL_TIMEOUT_SECONDS = 12
-CONNECT_TIMEOUT_SECONDS = 8
 # Max concurrent detail lookups during enrichment.
-DETAIL_WORKERS = 6
+DETAIL_WORKERS = 8
+# Only enrich the first N hits so search can stream cards sooner.
+# Remaining rows still return with search2 fields (title, deadline, url, status).
+ENRICH_LIMIT = 10
+DETAIL_TIMEOUT_SECONDS = 8
+CONNECT_TIMEOUT_SECONDS = 5
+REQUEST_TIMEOUT_SECONDS = 20
 
 # Only map known priority areas — never guess.
 PRIORITY_AREA_TO_FUNDING_CATEGORY = {
@@ -646,8 +649,12 @@ async def search_with_filters_async(
         filtered = _filter_by_location(hits, subject)
         # Keep a wider pre-enrich pool; freshness filtering happens in grant_agent.
         normalized = [_normalize_hit(hit) for hit in filtered][:30]
-        # Soft-enrich with full details (agency contact/address, awards, etc.).
-        return await _enrich_hits_async(active, normalized)
+        # Enrich only the leading slice so the async tool can return (and the UI
+        # can paint first cards) without waiting on every detail lookup.
+        head = normalized[:ENRICH_LIMIT]
+        tail = normalized[ENRICH_LIMIT:]
+        enriched_head = await _enrich_hits_async(active, head)
+        return enriched_head + tail
 
     if client is not None:
         return await _run(client)

@@ -285,15 +285,39 @@ async def search_grants_async(
     async def _run(active: httpx.AsyncClient) -> list[dict[str, Any]]:
         results: list[dict[str, Any]] = []
 
+        discover_params = {
+            "q": query,
+            "state": location_state.upper() if location_state else "",
+            "org_type": mapped_org,
+            "limit": str(effective_limit),
+        }
+        grants_params = {
+            "q": query,
+            "status": "active",
+            "state": location_state.upper() if location_state else "",
+            "limit": str(effective_limit),
+            "sort": "relevance",
+        }
+
+        # Kick both third-party GETs concurrently; prefer discover when it returns rows.
         if use_discover:
-            discover_params = {
-                "q": query,
-                "state": location_state.upper() if location_state else "",
-                "org_type": mapped_org,
-                "limit": str(effective_limit),
-            }
-            body = await _get_json_async(active, DISCOVER_URL, discover_params)
-            rows = (body or {}).get("data") if body else None
+            discover_task = asyncio.create_task(
+                _get_json_async(active, DISCOVER_URL, discover_params)
+            )
+            grants_task = asyncio.create_task(
+                _get_json_async(active, GRANTS_URL, grants_params)
+            )
+            discover_body, grants_body = await asyncio.gather(
+                discover_task, grants_task, return_exceptions=True
+            )
+            if isinstance(discover_body, BaseException):
+                logger.warning("GrantedAI discover failed: %s", discover_body)
+                discover_body = None
+            if isinstance(grants_body, BaseException):
+                logger.warning("GrantedAI grants failed: %s", grants_body)
+                grants_body = None
+
+            rows = (discover_body or {}).get("data") if isinstance(discover_body, dict) else None
             if isinstance(rows, list):
                 results = [
                     _normalize_grant(row, from_discover=True)
@@ -301,14 +325,15 @@ async def search_grants_async(
                     if isinstance(row, dict)
                 ][:effective_limit]
 
-        if not results:
-            grants_params = {
-                "q": query,
-                "status": "active",
-                "state": location_state.upper() if location_state else "",
-                "limit": str(effective_limit),
-                "sort": "relevance",
-            }
+            if not results:
+                rows = (grants_body or {}).get("data") if isinstance(grants_body, dict) else None
+                if isinstance(rows, list):
+                    results = [
+                        _normalize_grant(row, from_discover=False)
+                        for row in rows
+                        if isinstance(row, dict)
+                    ][:effective_limit]
+        else:
             body = await _get_json_async(active, GRANTS_URL, grants_params)
             rows = (body or {}).get("data") if body else None
             if isinstance(rows, list):

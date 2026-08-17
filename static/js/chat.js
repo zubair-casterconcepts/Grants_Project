@@ -787,10 +787,18 @@
         `<p class="chat-match-summary">${escapeHtml(summary)}</p>
          <div class="chat-matches">${meta.matches
            .map((m, i) => renderCard(m, i))
-           .join("")}</div>`,
+           .join("")}</div>
+         ${matchToolbarHtml()}`,
         { persist: false }
       );
-      bindSaveForms(row);
+      // appendAssistantHtml is async in signature but called without await here historically —
+      // it returns a Promise; normalize to element when available.
+      Promise.resolve(row).then((el) => {
+        if (!el) return;
+        bindSaveForms(el);
+        bindMatchToolbar(el);
+        showMatchToolbar(el);
+      });
       return;
     }
     appendText(role, message.content || "", { persist: false });
@@ -1122,7 +1130,93 @@
     `;
   }
 
-  function renderCard(match, index) {
+  function matchKey(match) {
+    return `${match.source || ""}:${match.save_external_id || match.id || match.number || match.url || match.title || ""}`;
+  }
+
+  function matchToolbarHtml() {
+    return `
+      <div class="chat-match-toolbar" hidden>
+        <button type="button" class="chat-match-sort-btn" aria-pressed="false" title="Sort by match score">
+          <span class="chat-match-sort-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none">
+              <path d="M4 7h10M4 12h7M4 17h4M16 6v12M16 18l-3-3M16 6l3 3" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </span>
+          <span class="chat-match-sort-label">Sort by score</span>
+        </button>
+      </div>
+    `;
+  }
+
+  function showMatchToolbar(row) {
+    const toolbar = row && row.querySelector(".chat-match-toolbar");
+    if (!toolbar) return;
+    const cards = row.querySelectorAll(".match-card");
+    toolbar.hidden = cards.length < 2;
+  }
+
+  function bindMatchToolbar(row, onReorder) {
+    if (!row) return;
+    const btn = row.querySelector(".chat-match-sort-btn");
+    const matchesRoot = row.querySelector(".chat-matches");
+    if (!btn || !matchesRoot || btn.dataset.bound === "1") return;
+    btn.dataset.bound = "1";
+
+    let sorted = false;
+    let originalKeys = null;
+
+    const labelEl = btn.querySelector(".chat-match-sort-label");
+
+    btn.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const cards = Array.from(matchesRoot.querySelectorAll(".match-card"));
+      if (cards.length < 2) return;
+
+      const anchor = captureScrollAnchor();
+
+      if (!sorted) {
+        originalKeys = cards.map((card) => card.dataset.matchKey || "");
+        cards.sort((a, b) => {
+          const scoreA = Number.parseFloat(a.querySelector(".score-badge")?.textContent || "") || 0;
+          const scoreB = Number.parseFloat(b.querySelector(".score-badge")?.textContent || "") || 0;
+          if (scoreB !== scoreA) return scoreB - scoreA;
+          return (a.dataset.matchKey || "").localeCompare(b.dataset.matchKey || "");
+        });
+        cards.forEach((card) => matchesRoot.appendChild(card));
+        sorted = true;
+        btn.setAttribute("aria-pressed", "true");
+        btn.title = "Restore original order";
+        if (labelEl) labelEl.textContent = "Original order";
+      } else {
+        const byKey = new Map(
+          cards.map((card) => [card.dataset.matchKey || "", card])
+        );
+        (originalKeys || []).forEach((key) => {
+          const card = byKey.get(key);
+          if (card) matchesRoot.appendChild(card);
+        });
+        sorted = false;
+        originalKeys = null;
+        btn.setAttribute("aria-pressed", "false");
+        btn.title = "Sort by match score";
+        if (labelEl) labelEl.textContent = "Sort by score";
+      }
+
+      if (typeof onReorder === "function") {
+        const nextKeys = Array.from(matchesRoot.querySelectorAll(".match-card")).map(
+          (card) => card.dataset.matchKey || ""
+        );
+        onReorder(nextKeys, sorted);
+      }
+
+      if (stickToBottom) scrollToBottom();
+      else restoreScrollAnchor(anchor);
+    });
+  }
+
+  function chanceMeta(match) {
     const score =
       match.score != null && match.score !== ""
         ? Number(match.score).toFixed(2)
@@ -1131,7 +1225,7 @@
       match.chance_percent != null
         ? match.chance_percent
         : Math.round((Number(match.score) || 0) * 100);
-    const tier = String(match.chance_tier || "").toLowerCase();
+    const tier = String(match.chance_tier || "").toLowerCase() || "medium";
     const chanceLabel =
       match.chance_label ||
       (tier === "high"
@@ -1141,6 +1235,11 @@
           : tier === "low"
             ? "Lower chance"
             : `${chance}% chance`);
+    return { score, chance, tier, chanceLabel };
+  }
+
+  function renderCard(match, index) {
+    const { score, chance, tier, chanceLabel } = chanceMeta(match);
     const titleHtml = match.url
       ? `<a class="match-title-link" href="${attr(match.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(match.title || "Untitled grant")}</a>`
       : escapeHtml(match.title || "Untitled grant");
@@ -1148,20 +1247,22 @@
     const categoryHtml = category
       ? `<span class="category-pill" title="Category: ${attr(category)}"><span class="category-pill-icon" aria-hidden="true">${icons.tag}</span><span class="visually-hidden">Category:</span><span>${escapeHtml(category)}</span></span>`
       : "";
+    const reason = String(match.reason || "").trim();
 
     return `
-      <article class="match-card chance-${attr(tier || "medium")}" style="--i: ${index}">
+      <article class="match-card chance-${attr(tier)}" style="--i: ${index}" data-match-key="${attr(matchKey(match))}">
         <div class="score-badge" title="${attr(chanceLabel)} (${chance}%)" aria-label="Match score ${score}, ${chanceLabel}">${escapeHtml(score)}</div>
         <div class="match-content">
           <div class="match-head">
             <h2>${titleHtml}</h2>
             ${categoryHtml}
-            <span class="chance-pill chance-${attr(tier || "medium")}">${escapeHtml(chanceLabel)}</span>
+            <span class="chance-pill chance-${attr(tier)}">${escapeHtml(chanceLabel)}</span>
             <span class="source-pill source-${attr(match.source || "grants_gov")}">${escapeHtml(sourceLabel(match.source))}</span>
           </div>
           <div class="match-info">
             ${renderInfoRows(match)}
           </div>
+          ${reason ? `<p class="match-reason">${escapeHtml(reason)}</p>` : `<p class="match-reason" hidden></p>`}
           <div class="match-footer">
             <div class="match-actions">
               ${match.url ? `<a class="btn-view" href="${attr(match.url)}" target="_blank" rel="noopener noreferrer">View</a>` : ""}
@@ -1171,6 +1272,58 @@
         </div>
       </article>
     `;
+  }
+
+  function patchCardInPlace(card, match) {
+    if (!card || !match) return;
+    const { score, chance, tier, chanceLabel } = chanceMeta(match);
+    card.classList.remove("chance-high", "chance-medium", "chance-low");
+    card.classList.add(`chance-${tier}`);
+    card.dataset.matchKey = matchKey(match);
+
+    const badge = card.querySelector(".score-badge");
+    if (badge) {
+      badge.textContent = score;
+      badge.title = `${chanceLabel} (${chance}%)`;
+      badge.setAttribute("aria-label", `Match score ${score}, ${chanceLabel}`);
+    }
+
+    const chancePill = card.querySelector(".chance-pill");
+    if (chancePill) {
+      chancePill.className = `chance-pill chance-${tier}`;
+      chancePill.textContent = chanceLabel;
+    }
+
+    const category = String(match.category || "").trim();
+    let categoryPill = card.querySelector(".category-pill");
+    const head = card.querySelector(".match-head");
+    if (category && head) {
+      if (categoryPill) {
+        const label = categoryPill.querySelector("span:last-child");
+        if (label) label.textContent = category;
+        categoryPill.title = `Category: ${category}`;
+      } else {
+        const h2 = head.querySelector("h2");
+        const html = `<span class="category-pill" title="Category: ${attr(category)}"><span class="category-pill-icon" aria-hidden="true">${icons.tag}</span><span class="visually-hidden">Category:</span><span>${escapeHtml(category)}</span></span>`;
+        if (h2) h2.insertAdjacentHTML("afterend", html);
+      }
+    }
+
+    const reasonEl = card.querySelector(".match-reason");
+    const reason = String(match.reason || "").trim();
+    if (reasonEl) {
+      if (reason) {
+        reasonEl.hidden = false;
+        reasonEl.textContent = reason;
+      }
+    }
+
+    const scoreInput = card.querySelector('input[name="score"]');
+    if (scoreInput) scoreInput.value = match.score ?? "";
+    const reasonInput = card.querySelector('input[name="reason"]');
+    if (reasonInput) reasonInput.value = match.reason || "";
+    const categoryInput = card.querySelector('input[name="category"]');
+    if (categoryInput && category) categoryInput.value = category;
   }
 
   function updateSavedNavCount(count) {
@@ -1267,7 +1420,8 @@
     currentStep = null;
     input.placeholder = "Message Grants…";
     setComposerEnabled(false);
-    // Re-pin for the streaming session so each SSE chunk stays in view.
+    // Pin for the initial search kickoff; unlock once the first cards appear
+    // so later SSE updates don't yank a reader away from card #1.
     stickToBottom = true;
     scrollToBottom({ force: true });
     await syncProjectSnapshot();
@@ -1279,8 +1433,11 @@
     let summaryEl = null;
     let matchesEl = null;
     let seenKeys = new Set();
+    let displayedMatches = [];
     let cardIndex = 0;
     let finished = false;
+    let hasVisibleCards = false;
+    let rankingNote = "";
 
     const setStatus = async (text) => {
       if (!statusBubble) {
@@ -1290,71 +1447,150 @@
       }
       const anchor = captureScrollAnchor();
       statusBubble.textContent = text;
+      if (hasVisibleCards) {
+        // Keep the reader on the same cards while ranking continues below/above.
+        restoreScrollAnchor(anchor);
+        return;
+      }
       restoreScrollAnchor(anchor);
       scrollToBottom();
     };
 
     const ensureResultsShell = async (placeText) => {
       if (resultsRow) return;
+      const anchor = captureScrollAnchor();
       resultsRow = await appendAssistantHtml(
         `<p class="chat-match-summary">Gathering ranked opportunities${escapeHtml(placeText)}…</p>
-         <div class="chat-matches"></div>`,
+         <div class="chat-matches"></div>
+         <p class="chat-match-progress" hidden></p>
+         ${matchToolbarHtml()}`,
         { persist: false }
       );
       summaryEl = resultsRow.querySelector(".chat-match-summary");
       matchesEl = resultsRow.querySelector(".chat-matches");
+      bindMatchToolbar(resultsRow, (nextKeys) => {
+        if (!Array.isArray(nextKeys) || !nextKeys.length) return;
+        const byKey = new Map(
+          displayedMatches.map((row) => [matchKey(row), row])
+        );
+        displayedMatches = nextKeys
+          .map((key) => byKey.get(key))
+          .filter(Boolean);
+      });
+      if (hasVisibleCards) {
+        restoreScrollAnchor(anchor);
+      } else {
+        scrollToBottom();
+      }
+    };
+
+    const setProgressNote = (text) => {
+      if (!resultsRow) return;
+      const noteEl = resultsRow.querySelector(".chat-match-progress");
+      if (!noteEl) return;
+      rankingNote = String(text || "").trim();
+      if (!rankingNote) {
+        noteEl.hidden = true;
+        noteEl.textContent = "";
+        return;
+      }
+      noteEl.hidden = false;
+      noteEl.textContent = rankingNote;
     };
 
     const appendMatchCards = (matches) => {
       if (!matchesEl || !Array.isArray(matches)) return;
+      const beforeCount = cardIndex;
+      const anchor = captureScrollAnchor();
       for (const match of matches) {
-        const key = `${match.source || ""}:${match.save_external_id || match.id || match.number || match.url || match.title || ""}`;
-        if (seenKeys.has(key)) continue;
+        const key = matchKey(match);
+        if (!key || seenKeys.has(key)) continue;
         seenKeys.add(key);
+        displayedMatches.push(match);
         matchesEl.insertAdjacentHTML("beforeend", renderCard(match, cardIndex));
         cardIndex += 1;
       }
+      if (cardIndex === beforeCount) return;
       bindSaveForms(resultsRow);
-      scrollToBottom();
+      if (!hasVisibleCards) {
+        hasVisibleCards = true;
+        // Bring the first cards into view, then unlock so later SSE chunks
+        // cannot pull the reader to the bottom while they read card #1.
+        scrollToBottom();
+        stickToBottom = false;
+        return;
+      }
+      if (stickToBottom) {
+        scrollToBottom();
+      } else {
+        restoreScrollAnchor(anchor);
+      }
     };
 
     const renderFinal = async (matches, location, savedCount) => {
       const placeText = placeTextFrom(location);
-      if (!matches.length) {
+      const finalMatches = Array.isArray(matches) ? matches : [];
+      if (!finalMatches.length && !displayedMatches.length) {
         const emptyAnchor = captureScrollAnchor();
         if (resultsRow) removeNode(resultsRow);
         const emptyMsg = `I couldn't find ranked matches yet${placeText}. You can update your project details in chat, then ask me to search again.`;
         await setStatus(emptyMsg);
         restoreScrollAnchor(emptyAnchor);
         await persistMessage("assistant", emptyMsg);
-        scrollToBottom();
+        if (stickToBottom) scrollToBottom();
         return;
       }
       await ensureResultsShell(placeText);
-      const noun = matches.length === 1 ? "opportunity" : "opportunities";
-      const summary = `Here are ${matches.length} ranked ${noun} from Grants.gov, USASpending, and GrantedAI${placeText}.`;
       const anchor = captureScrollAnchor();
-      if (summaryEl) {
-        summaryEl.textContent = summary;
+
+      // Merge AI scores onto the same cards in arrival order — never reshuffle DOM.
+      const byKey = new Map();
+      for (const match of finalMatches) {
+        const key = matchKey(match);
+        if (key) byKey.set(key, match);
       }
-      seenKeys = new Set();
-      cardIndex = 0;
+
       if (matchesEl) {
-        matchesEl.innerHTML = matches.map((m, i) => renderCard(m, i)).join("");
+        matchesEl.querySelectorAll(".match-card").forEach((card) => {
+          const key = card.dataset.matchKey || "";
+          const updated = byKey.get(key);
+          if (!updated) return;
+          patchCardInPlace(card, updated);
+          const idx = displayedMatches.findIndex((row) => matchKey(row) === key);
+          if (idx >= 0) displayedMatches[idx] = { ...displayedMatches[idx], ...updated };
+        });
       }
+
+      // Append any final-only rows at the end (still no reordering of existing cards).
+      const missing = finalMatches.filter((match) => {
+        const key = matchKey(match);
+        return key && !seenKeys.has(key);
+      });
+      if (missing.length) appendMatchCards(missing);
+
+      const total = displayedMatches.length || finalMatches.length;
+      const noun = total === 1 ? "opportunity" : "opportunities";
+      const summary = `Here are ${total} ${noun} from Grants.gov, USASpending, and GrantedAI${placeText}.`;
+      if (summaryEl) summaryEl.textContent = summary;
+      setProgressNote("");
+      hasVisibleCards = true;
       bindSaveForms(resultsRow);
+      showMatchToolbar(resultsRow);
       if (typeof savedCount === "number") updateSavedNavCount(savedCount);
-      // Removing the status row shortens the page above the results.
       if (statusRow) removeNode(statusRow);
       statusRow = null;
       statusBubble = null;
-      restoreScrollAnchor(anchor);
+      if (stickToBottom) {
+        scrollToBottom();
+      } else {
+        restoreScrollAnchor(anchor);
+      }
       await persistMessage("assistant", summary, {
         type: "matches",
-        matches,
+        // Persist stable on-screen order (arrival order + score patches).
+        matches: displayedMatches.length ? displayedMatches : finalMatches,
         location: location || {},
       });
-      scrollToBottom();
     };
 
     try {
@@ -1369,12 +1605,39 @@
       await readSseEvents(response, async (event) => {
         const type = event.type || "";
         if (type === "status") {
-          await setStatus(event.message || "Searching…");
+          const message = event.message || "Searching…";
+          if (hasVisibleCards) {
+            setProgressNote(message);
+            const placeText = placeTextFrom(event.location || {});
+            if (summaryEl) {
+              const anchor = captureScrollAnchor();
+              summaryEl.textContent = `Ranking opportunities${placeText}…`;
+              restoreScrollAnchor(anchor);
+            }
+          } else {
+            await setStatus(message);
+          }
           return;
         }
         if (type === "source") {
-          // Keep one loader while sources finish in parallel; render only on done.
-          await setStatus(event.message || "Still searching…");
+          const placeText = placeTextFrom(event.location || {});
+          await ensureResultsShell(placeText);
+          const incoming = Array.isArray(event.matches) ? event.matches : [];
+          if (incoming.length) {
+            appendMatchCards(incoming);
+            if (summaryEl && hasVisibleCards) {
+              const anchor = captureScrollAnchor();
+              const noun = cardIndex === 1 ? "opportunity" : "opportunities";
+              summaryEl.textContent = `Showing ${cardIndex} ${noun} so far${placeText}. More sources still loading…`;
+              if (!stickToBottom) restoreScrollAnchor(anchor);
+            }
+          }
+          const statusMsg = event.message || "Still searching…";
+          if (hasVisibleCards) {
+            setProgressNote(statusMsg);
+          } else {
+            await setStatus(statusMsg);
+          }
           if (typeof event.saved_count === "number") {
             updateSavedNavCount(event.saved_count);
           }
