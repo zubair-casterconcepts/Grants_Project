@@ -1317,6 +1317,7 @@ async def _aiter_agent_events(
     }
     call_map: dict[str, str] = {}
     emitted_sources: set[str] = set()
+    calling_labels: list[str] = []
 
     async for event in result.stream_events():
         if not isinstance(event, RunItemStreamEvent):
@@ -1326,12 +1327,17 @@ async def _aiter_agent_events(
             call_id = getattr(event.item, "call_id", None)
             if call_id and tool_name:
                 call_map[str(call_id)] = tool_name
-            label = _SOURCE_LABELS.get(tool_name, tool_name or "source")
-            yield {
-                "type": "status",
-                "message": f"Agent calling {label}…",
-                "location": location,
-            }
+            label = _SOURCE_LABELS.get(tool_name, tool_name or "")
+            if label and label not in calling_labels:
+                calling_labels.append(label)
+            if calling_labels:
+                yield {
+                    "type": "status",
+                    "message": "\n".join(
+                        f"Agent calling {name}…" for name in calling_labels
+                    ),
+                    "location": location,
+                }
             continue
 
         if event.name != "tool_output" or not isinstance(event.item, ToolCallOutputItem):

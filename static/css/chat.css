@@ -568,6 +568,82 @@ body.chat-sidebar-collapsed .chat-sidebar-toggle {
   box-shadow: none;
 }
 
+/* Claude-style faded “thinking” block for Agent calling… */
+.chat-row.is-assistant .chat-bubble.chat-status-calling {
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  padding: 0.2rem 0.15rem;
+  color: rgba(55, 53, 47, 0.45);
+}
+
+.chat-thinking-block {
+  display: grid;
+  grid-template-columns: 1rem minmax(0, 1fr);
+  column-gap: 0.65rem;
+  align-items: start;
+}
+
+.chat-thinking-clock {
+  display: inline-flex;
+  width: 0.95rem;
+  height: 0.95rem;
+  margin-top: 0.12rem;
+  color: rgba(55, 53, 47, 0.38);
+}
+
+.chat-thinking-clock svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.chat-thinking-content {
+  border-left: 1px solid rgba(55, 53, 47, 0.14);
+  padding: 0.05rem 0 0.15rem 0.85rem;
+  min-width: 0;
+}
+
+.chat-thinking-line {
+  margin: 0 0 0.38rem;
+  font-size: 0.92rem;
+  line-height: 1.5;
+  font-weight: 400;
+  color: rgba(55, 53, 47, 0.42);
+}
+
+.chat-thinking-line:last-child {
+  margin-bottom: 0;
+  color: rgba(55, 53, 47, 0.32);
+}
+
+.chat-thinking-done {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-top: 0.45rem;
+  font-size: 0.88rem;
+  color: rgba(55, 53, 47, 0.4);
+}
+
+.chat-thinking-done-icon {
+  display: inline-flex;
+  width: 0.95rem;
+  height: 0.95rem;
+  color: rgba(55, 53, 47, 0.38);
+}
+
+.chat-thinking-done-icon svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.chat-match-progress.chat-status-calling {
+  color: rgba(55, 53, 47, 0.42);
+  opacity: 1;
+}
+
 .chat-row.is-user .chat-bubble {
   background: var(--chat-green);
   color: #f7f6f2;
@@ -616,6 +692,7 @@ body.chat-sidebar-collapsed .chat-sidebar-toggle {
   font-size: 0.9rem;
   line-height: 1.4;
   opacity: 0.72;
+  white-space: pre-line;
 }
 
 .chat-match-toolbar {

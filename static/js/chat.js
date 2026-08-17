@@ -897,6 +897,44 @@
     );
   }
 
+  const THINKING_CLOCK_ICON = `
+    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <circle cx="12" cy="12" r="8.25" stroke="currentColor" stroke-width="1.6"/>
+      <path d="M12 8.2V12l2.6 1.7" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
+  `;
+
+  const THINKING_DONE_ICON = `
+    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <circle cx="12" cy="12" r="8.25" stroke="currentColor" stroke-width="1.6"/>
+      <path d="m8.7 12.2 2.2 2.2 4.4-4.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
+  `;
+
+  function renderThinkingHtml(linesText, options = {}) {
+    const lines = String(linesText || "")
+      .split(/\n+/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map(
+        (line) =>
+          `<p class="chat-thinking-line">${escapeHtml(line)}</p>`
+      )
+      .join("");
+    const done = options.done
+      ? `<div class="chat-thinking-done"><span class="chat-thinking-done-icon">${THINKING_DONE_ICON}</span><span>Done</span></div>`
+      : "";
+    return `
+      <div class="chat-thinking-block" aria-live="polite">
+        <span class="chat-thinking-clock">${THINKING_CLOCK_ICON}</span>
+        <div class="chat-thinking-content">
+          ${lines}
+          ${done}
+        </div>
+      </div>
+    `;
+  }
+
   function removeNode(node) {
     if (node && node.parentNode) node.parentNode.removeChild(node);
   }
@@ -1423,12 +1461,32 @@
     // Pin for the initial search kickoff; unlock once the first cards appear
     // so later SSE updates don't yank a reader away from card #1.
     stickToBottom = true;
+
+    // Show the loader immediately — before sync/network — so Find Grants feels instant.
+    let statusRow = showTyping();
+    let statusBubble = statusRow.querySelector(".chat-bubble");
     scrollToBottom({ force: true });
+
+    const callingLabels = [];
+    const noteAgentCalling = (message) => {
+      const raw = String(message || "").trim();
+      // Support single or multi-line "Agent calling X…" payloads.
+      const lines = raw.split(/\n+/).map((line) => line.trim()).filter(Boolean);
+      let sawCalling = false;
+      for (const line of lines) {
+        const match = line.match(/^Agent calling\s+(.+?)(?:…|\.\.\.)?\s*$/i);
+        if (!match) continue;
+        sawCalling = true;
+        const label = match[1].replace(/[.…]+$/g, "").trim();
+        if (label && !callingLabels.includes(label)) callingLabels.push(label);
+      }
+      if (!sawCalling) return null;
+      return callingLabels.map((label) => `Agent calling ${label}…`).join("\n");
+    };
+
     await syncProjectSnapshot();
     const queryText = String(userQuery || "").trim();
 
-    let statusRow = showTyping();
-    let statusBubble = statusRow.querySelector(".chat-bubble");
     let resultsRow = null;
     let summaryEl = null;
     let matchesEl = null;
@@ -1440,20 +1498,41 @@
     let rankingNote = "";
 
     const setStatus = async (text) => {
+      const callingText = noteAgentCalling(text);
+      const merged = callingText || String(text || "").trim();
       if (!statusBubble) {
-        statusRow = await appendText("assistant", text, { persist: false });
+        statusRow = await appendText("assistant", "", { persist: false });
         statusBubble = statusRow.querySelector(".chat-bubble");
-        return;
       }
+      if (!statusBubble) return;
+
       const anchor = captureScrollAnchor();
-      statusBubble.textContent = text;
-      if (hasVisibleCards) {
-        // Keep the reader on the same cards while ranking continues below/above.
+      if (callingText) {
+        statusBubble.classList.add("chat-status-calling");
+        statusBubble.style.whiteSpace = "normal";
+        statusBubble.innerHTML = renderThinkingHtml(callingText);
+      } else {
+        statusBubble.classList.remove("chat-status-calling");
+        statusBubble.style.whiteSpace = "pre-line";
+        statusBubble.textContent = merged;
+      }
+      if (hasVisibleCards) restoreScrollAnchor(anchor);
+      else {
         restoreScrollAnchor(anchor);
+        scrollToBottom();
+      }
+    };
+
+    const markThinkingDone = () => {
+      if (!statusBubble || !statusBubble.classList.contains("chat-status-calling")) {
         return;
       }
-      restoreScrollAnchor(anchor);
-      scrollToBottom();
+      const content = statusBubble.querySelector(".chat-thinking-content");
+      if (!content || content.querySelector(".chat-thinking-done")) return;
+      content.insertAdjacentHTML(
+        "beforeend",
+        `<div class="chat-thinking-done"><span class="chat-thinking-done-icon">${THINKING_DONE_ICON}</span><span>Done</span></div>`
+      );
     };
 
     const ensureResultsShell = async (placeText) => {
@@ -1488,14 +1567,24 @@
       if (!resultsRow) return;
       const noteEl = resultsRow.querySelector(".chat-match-progress");
       if (!noteEl) return;
-      rankingNote = String(text || "").trim();
+      const callingText = noteAgentCalling(text);
+      rankingNote = (callingText || String(text || "")).trim();
       if (!rankingNote) {
         noteEl.hidden = true;
         noteEl.textContent = "";
+        noteEl.classList.remove("chat-status-calling");
         return;
       }
       noteEl.hidden = false;
-      noteEl.textContent = rankingNote;
+      if (callingText) {
+        noteEl.classList.add("chat-status-calling");
+        noteEl.style.whiteSpace = "normal";
+        noteEl.innerHTML = renderThinkingHtml(callingText);
+      } else {
+        noteEl.classList.remove("chat-status-calling");
+        noteEl.style.whiteSpace = "pre-line";
+        noteEl.textContent = rankingNote;
+      }
     };
 
     const appendMatchCards = (matches) => {
@@ -1514,6 +1603,7 @@
       bindSaveForms(resultsRow);
       if (!hasVisibleCards) {
         hasVisibleCards = true;
+        markThinkingDone();
         // Bring the first cards into view, then unlock so later SSE chunks
         // cannot pull the reader to the bottom while they read card #1.
         scrollToBottom();
@@ -1577,6 +1667,7 @@
       bindSaveForms(resultsRow);
       showMatchToolbar(resultsRow);
       if (typeof savedCount === "number") updateSavedNavCount(savedCount);
+      markThinkingDone();
       if (statusRow) removeNode(statusRow);
       statusRow = null;
       statusBubble = null;
@@ -1606,16 +1697,18 @@
         const type = event.type || "";
         if (type === "status") {
           const message = event.message || "Searching…";
+          const callingText = noteAgentCalling(message);
+          const display = callingText || message;
           if (hasVisibleCards) {
-            setProgressNote(message);
+            setProgressNote(display);
             const placeText = placeTextFrom(event.location || {});
-            if (summaryEl) {
+            if (summaryEl && !callingText) {
               const anchor = captureScrollAnchor();
               summaryEl.textContent = `Ranking opportunities${placeText}…`;
               restoreScrollAnchor(anchor);
             }
           } else {
-            await setStatus(message);
+            await setStatus(display);
           }
           return;
         }
@@ -1818,12 +1911,20 @@
   // profile (same override logic as a typed message).
   async function runStarterSearch(card) {
     busy = true;
+    keepBusy = true;
     setComposerEnabled(false);
     const query = String(card.query || card.title || "").trim();
-    await appendText("user", card.title || query);
+    const display = card.title || query;
+    // Paint the user bubble immediately; persist in the background so the
+    // loader is not blocked on the messages API.
+    await appendText("user", display, { persist: false });
     clearSuggestions();
-    // loadMatches manages keepBusy/busy and re-enables the composer when done.
-    await loadMatches(query);
+    const persistUser = persistMessage("user", display).catch(() => {});
+    try {
+      await loadMatches(query);
+    } finally {
+      await persistUser;
+    }
   }
 
   async function handleReadyMessage(text) {
