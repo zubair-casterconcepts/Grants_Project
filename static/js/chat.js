@@ -911,7 +911,16 @@
     </svg>
   `;
 
+  const THINKING_CHEVRON_ICON = `
+    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path d="m8 10 4 4 4-4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
+  `;
+
   function renderThinkingHtml(linesText, options = {}) {
+    const open = options.open !== false;
+    const done = Boolean(options.done);
+    const label = done ? "Thought" : "Thinking";
     const lines = String(linesText || "")
       .split(/\n+/)
       .map((line) => line.trim())
@@ -921,18 +930,49 @@
           `<p class="chat-thinking-line">${escapeHtml(line)}</p>`
       )
       .join("");
-    const done = options.done
+    const doneRow = done
       ? `<div class="chat-thinking-done"><span class="chat-thinking-done-icon">${THINKING_DONE_ICON}</span><span>Done</span></div>`
       : "";
     return `
-      <div class="chat-thinking-block" aria-live="polite">
-        <span class="chat-thinking-clock">${THINKING_CLOCK_ICON}</span>
-        <div class="chat-thinking-content">
-          ${lines}
-          ${done}
+      <div class="chat-thinking ${open ? "is-open" : "is-collapsed"}" data-done="${done ? "1" : "0"}">
+        <button type="button" class="chat-thinking-toggle" aria-expanded="${open ? "true" : "false"}">
+          <span class="chat-thinking-chevron" aria-hidden="true">${THINKING_CHEVRON_ICON}</span>
+          <span class="chat-thinking-label">${label}</span>
+        </button>
+        <div class="chat-thinking-panel" ${open ? "" : "hidden"}>
+          <div class="chat-thinking-block" aria-live="polite">
+            <span class="chat-thinking-clock">${THINKING_CLOCK_ICON}</span>
+            <div class="chat-thinking-content">
+              ${lines}
+              ${doneRow}
+            </div>
+          </div>
         </div>
       </div>
     `;
+  }
+
+  function bindThinkingToggle(root) {
+    if (!root) return;
+    const toggle = root.querySelector(".chat-thinking-toggle");
+    const thinking = root.querySelector(".chat-thinking");
+    const panel = root.querySelector(".chat-thinking-panel");
+    if (!toggle || !thinking || !panel || toggle.dataset.bound === "1") return;
+    toggle.dataset.bound = "1";
+    toggle.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const open = thinking.classList.toggle("is-open");
+      thinking.classList.toggle("is-collapsed", !open);
+      toggle.setAttribute("aria-expanded", open ? "true" : "false");
+      panel.hidden = !open;
+    });
+  }
+
+  function thinkingIsOpen(root) {
+    const thinking = root && root.querySelector(".chat-thinking");
+    if (!thinking) return true;
+    return thinking.classList.contains("is-open");
   }
 
   function removeNode(node) {
@@ -1468,6 +1508,8 @@
     scrollToBottom({ force: true });
 
     const callingLabels = [];
+    let queryStatusLine = "";
+
     const noteAgentCalling = (message) => {
       const raw = String(message || "").trim();
       // Support single or multi-line "Agent calling X…" payloads.
@@ -1484,6 +1526,40 @@
       return callingLabels.map((label) => `Agent calling ${label}…`).join("\n");
     };
 
+    const buildThinkingText = (message) => {
+      const raw = String(message || "").trim();
+      if (raw) {
+        noteAgentCalling(raw);
+        if (
+          /^Agent is querying\b/i.test(raw) ||
+          /^Searching Grants\.gov\b/i.test(raw)
+        ) {
+          queryStatusLine = raw;
+        }
+      }
+      const parts = [];
+      if (queryStatusLine) parts.push(queryStatusLine);
+      if (callingLabels.length) {
+        parts.push(
+          ...callingLabels.map((label) => `Agent calling ${label}…`)
+        );
+      }
+      return parts.length ? parts.join("\n") : null;
+    };
+
+    const paintThinking = (root, thinkingText, options = {}) => {
+      if (!root || !thinkingText) return;
+      const open =
+        options.open != null ? options.open : thinkingIsOpen(root);
+      root.classList.add("chat-status-calling");
+      root.style.whiteSpace = "normal";
+      root.innerHTML = renderThinkingHtml(thinkingText, {
+        open,
+        done: Boolean(options.done),
+      });
+      bindThinkingToggle(root);
+    };
+
     await syncProjectSnapshot();
     const queryText = String(userQuery || "").trim();
 
@@ -1498,8 +1574,8 @@
     let rankingNote = "";
 
     const setStatus = async (text) => {
-      const callingText = noteAgentCalling(text);
-      const merged = callingText || String(text || "").trim();
+      const thinkingText = buildThinkingText(text);
+      const merged = thinkingText || String(text || "").trim();
       if (!statusBubble) {
         statusRow = await appendText("assistant", "", { persist: false });
         statusBubble = statusRow.querySelector(".chat-bubble");
@@ -1507,10 +1583,13 @@
       if (!statusBubble) return;
 
       const anchor = captureScrollAnchor();
-      if (callingText) {
-        statusBubble.classList.add("chat-status-calling");
-        statusBubble.style.whiteSpace = "normal";
-        statusBubble.innerHTML = renderThinkingHtml(callingText);
+      if (thinkingText) {
+        paintThinking(statusBubble, thinkingText, {
+          open: statusBubble.querySelector(".chat-thinking")
+            ? thinkingIsOpen(statusBubble)
+            : true,
+          done: false,
+        });
       } else {
         statusBubble.classList.remove("chat-status-calling");
         statusBubble.style.whiteSpace = "pre-line";
@@ -1523,16 +1602,43 @@
       }
     };
 
-    const markThinkingDone = () => {
-      if (!statusBubble || !statusBubble.classList.contains("chat-status-calling")) {
+    const clearThinkingStatus = () => {
+      if (statusRow) {
+        removeNode(statusRow);
+        statusRow = null;
+        statusBubble = null;
+      }
+    };
+
+    const setProgressNote = (text) => {
+      if (!resultsRow) return;
+      const noteEl = resultsRow.querySelector(".chat-match-progress");
+      if (!noteEl) return;
+      const raw = String(text || "").trim();
+      const thinkingText = buildThinkingText(raw);
+      // Thinking dropdown belongs only at the start — never under result cards.
+      if (
+        thinkingText ||
+        /^Agent (is querying|calling)\b/i.test(raw) ||
+        /^Searching Grants\.gov\b/i.test(raw)
+      ) {
+        noteEl.hidden = true;
+        noteEl.textContent = "";
+        noteEl.innerHTML = "";
+        noteEl.classList.remove("chat-status-calling");
         return;
       }
-      const content = statusBubble.querySelector(".chat-thinking-content");
-      if (!content || content.querySelector(".chat-thinking-done")) return;
-      content.insertAdjacentHTML(
-        "beforeend",
-        `<div class="chat-thinking-done"><span class="chat-thinking-done-icon">${THINKING_DONE_ICON}</span><span>Done</span></div>`
-      );
+      rankingNote = raw;
+      if (!rankingNote) {
+        noteEl.hidden = true;
+        noteEl.textContent = "";
+        noteEl.classList.remove("chat-status-calling");
+        return;
+      }
+      noteEl.hidden = false;
+      noteEl.classList.remove("chat-status-calling");
+      noteEl.style.whiteSpace = "pre-line";
+      noteEl.textContent = rankingNote;
     };
 
     const ensureResultsShell = async (placeText) => {
@@ -1563,30 +1669,6 @@
       }
     };
 
-    const setProgressNote = (text) => {
-      if (!resultsRow) return;
-      const noteEl = resultsRow.querySelector(".chat-match-progress");
-      if (!noteEl) return;
-      const callingText = noteAgentCalling(text);
-      rankingNote = (callingText || String(text || "")).trim();
-      if (!rankingNote) {
-        noteEl.hidden = true;
-        noteEl.textContent = "";
-        noteEl.classList.remove("chat-status-calling");
-        return;
-      }
-      noteEl.hidden = false;
-      if (callingText) {
-        noteEl.classList.add("chat-status-calling");
-        noteEl.style.whiteSpace = "normal";
-        noteEl.innerHTML = renderThinkingHtml(callingText);
-      } else {
-        noteEl.classList.remove("chat-status-calling");
-        noteEl.style.whiteSpace = "pre-line";
-        noteEl.textContent = rankingNote;
-      }
-    };
-
     const appendMatchCards = (matches) => {
       if (!matchesEl || !Array.isArray(matches)) return;
       const beforeCount = cardIndex;
@@ -1603,7 +1685,8 @@
       bindSaveForms(resultsRow);
       if (!hasVisibleCards) {
         hasVisibleCards = true;
-        markThinkingDone();
+        // Drop the start Thinking block once cards arrive — do not keep it at the end.
+        clearThinkingStatus();
         // Bring the first cards into view, then unlock so later SSE chunks
         // cannot pull the reader to the bottom while they read card #1.
         scrollToBottom();
@@ -1667,7 +1750,7 @@
       bindSaveForms(resultsRow);
       showMatchToolbar(resultsRow);
       if (typeof savedCount === "number") updateSavedNavCount(savedCount);
-      markThinkingDone();
+      clearThinkingStatus();
       if (statusRow) removeNode(statusRow);
       statusRow = null;
       statusBubble = null;
@@ -1697,18 +1780,17 @@
         const type = event.type || "";
         if (type === "status") {
           const message = event.message || "Searching…";
-          const callingText = noteAgentCalling(message);
-          const display = callingText || message;
+          const thinkingText = buildThinkingText(message);
           if (hasVisibleCards) {
-            setProgressNote(display);
+            setProgressNote(message);
             const placeText = placeTextFrom(event.location || {});
-            if (summaryEl && !callingText) {
+            if (summaryEl && !thinkingText) {
               const anchor = captureScrollAnchor();
               summaryEl.textContent = `Ranking opportunities${placeText}…`;
               restoreScrollAnchor(anchor);
             }
           } else {
-            await setStatus(display);
+            await setStatus(message);
           }
           return;
         }
