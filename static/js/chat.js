@@ -1741,6 +1741,28 @@
       });
       if (missing.length) appendMatchCards(missing);
 
+      // Final order is now authoritative and arrives instantly: arrange the cards
+      // to match it (grants.gov, then usaspending, then granted_ai — each sorted
+      // within its section). Drop preview cards that aren't in the final set, then
+      // move the rest into finalMatches order. Pure DOM moves — no added time.
+      if (matchesEl && finalMatches.length) {
+        const finalKeys = new Set(
+          finalMatches.map((match) => matchKey(match)).filter(Boolean)
+        );
+        matchesEl.querySelectorAll(".match-card").forEach((card) => {
+          if (!finalKeys.has(card.dataset.matchKey || "")) card.remove();
+        });
+        const cardByKey = new Map();
+        matchesEl.querySelectorAll(".match-card").forEach((card) => {
+          cardByKey.set(card.dataset.matchKey || "", card);
+        });
+        finalMatches.forEach((match) => {
+          const card = cardByKey.get(matchKey(match));
+          if (card) matchesEl.appendChild(card);
+        });
+        displayedMatches = finalMatches.slice();
+      }
+
       const total = displayedMatches.length || finalMatches.length;
       const noun = total === 1 ? "opportunity" : "opportunities";
       const summary = `Here are ${total} ${noun} from Grants.gov, USASpending, and GrantedAI${placeText}.`;
@@ -1761,7 +1783,7 @@
       }
       await persistMessage("assistant", summary, {
         type: "matches",
-        // Persist stable on-screen order (arrival order + score patches).
+        // Persist the final on-screen order (grouped by source, sorted within).
         matches: displayedMatches.length ? displayedMatches : finalMatches,
         location: location || {},
       });

@@ -727,6 +727,31 @@ def _neutral_rows(matches: list[dict[str, Any]]) -> list[dict[str, Any]]:
 DEFAULT_RESULT_LIMIT = 12
 DEFAULT_CANDIDATE_LIMIT = 18
 
+# Sources are shown grouped in this order, each section sorted on its own.
+_SOURCE_DISPLAY_ORDER = ("grants_gov", "usaspending", "granted_ai")
+
+
+def _rank_grouped_by_source(
+    matches: list[dict[str, Any]],
+    *,
+    limit: int = DEFAULT_CANDIDATE_LIMIT,
+) -> list[dict[str, Any]]:
+    """
+    Group results by source (Grants.gov, then USASpending, then GrantedAI) and
+    sort by chance WITHIN each source — not one global sort across all sources.
+    O(n) grouping + per-section sort, so it does not add to the response time.
+    """
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for row in matches:
+        grouped.setdefault(str(row.get("source") or ""), []).append(row)
+    ordered: list[dict[str, Any]] = []
+    for src in _SOURCE_DISPLAY_ORDER:
+        ordered.extend(_rank_by_chance(grouped.pop(src, [])))
+    # Any other/unknown sources keep a stable, sorted tail.
+    for src in list(grouped.keys()):
+        ordered.extend(_rank_by_chance(grouped.pop(src)))
+    return ordered[: max(1, int(limit or DEFAULT_CANDIDATE_LIMIT))]
+
 
 def _merge_score_rows(
     matches: list[dict[str, Any]],
@@ -958,6 +983,31 @@ async def _finalize_ranked_matches_async(
         result_limit=limit,
         candidate_limit=pool,
     )
+
+
+def _finalize_ranked_matches_fast(
+    matches: list[dict[str, Any]],
+    context: dict[str, Any],
+    *,
+    result_limit: int = DEFAULT_RESULT_LIMIT,
+) -> list[dict[str, Any]]:
+    """
+    Instant ranking with the local relevance heuristic — no second AI pass.
+
+    The matching agent has already fetched and scored these grants, so there is
+    no need for a second LLM scoring round-trip that costs about as long as the
+    fetch itself. This normalizes and ranks the already-gathered results locally
+    so the final list appears immediately, with no redundant second "loading".
+    """
+    limit = max(1, int(result_limit or DEFAULT_RESULT_LIMIT))
+    pool = max(limit, DEFAULT_CANDIDATE_LIMIT)
+    profile = context if isinstance(context, dict) else _search_context(context, "")
+    fresh = _filter_actionable_opportunities(list(matches))[:pool]
+    scored = [
+        _score_grant_against_profile(row, profile, rank_index=i)
+        for i, row in enumerate(fresh)
+    ]
+    return _attach_display_fields(_rank_by_chance(scored)[:limit])
 
 
 def _merge_source_details(
@@ -1201,7 +1251,7 @@ def _done_event(
     medium = sum(1 for m in final if m.get("chance_tier") == "medium")
     if final:
         done_message = (
-            f"Ranked {len(final)} opportunities with AI scoring "
+            f"Ranked {len(final)} opportunities "
             f"({high} high, {medium} medium chance)."
         )
     else:
@@ -1262,28 +1312,18 @@ async def _aiter_fallback_events(
                 "location": location,
             }
 
-    final = _score_merge(
-        collected["grants_gov"],
-        collected["usaspending"],
-        collected["granted_ai"],
-        profile=payload,
-        ai_priority=False,
+    # Score every collected opportunity locally (instant) and rank — results are
+    # final as soon as the sources return, with no redundant second pass.
+    all_rows = _filter_actionable_opportunities(
+        collected["grants_gov"] + collected["usaspending"] + collected["granted_ai"]
     )
-    if final:
-        yield {
-            "type": "status",
-            "message": (
-                "Scoring matches with AI against your request"
-                + (
-                    f" ({payload.get('location_state') or 'your location'}"
-                    f", {payload.get('priority_area') or 'your topic'})…"
-                    if payload.get("user_query")
-                    else " (saved profile defaults)…"
-                )
-            ),
-            "location": location,
-        }
-        final = await _finalize_ranked_matches_async(final, payload)
+    scored_rows = [
+        _score_grant_against_profile(row, payload, rank_index=i)
+        for i, row in enumerate(all_rows)
+    ]
+    final = _attach_display_fields(
+        _rank_grouped_by_source(scored_rows, limit=DEFAULT_CANDIDATE_LIMIT)
+    )
     yield _done_event(final, location)
 
 
@@ -1372,67 +1412,45 @@ async def _aiter_agent_events(
             "location": location,
         }
 
-    final_output = result.final_output
-    matches: list[dict[str, Any]] = []
-    if isinstance(final_output, GrantMatchResult):
-        matches = [m.model_dump() for m in final_output.matches]
-    elif isinstance(final_output, dict) and "matches" in final_output:
-        matches = list(final_output.get("matches") or [])
-    matches = _filter_actionable_opportunities(matches)
+        # Once every source has streamed in, we already have all the data we need.
+        # Stop here instead of waiting for the agent to generate its full final
+        # output — that generation was the second "loading" the user saw after the
+        # first results appeared, and we re-rank locally anyway.
+        if {"grants_gov", "usaspending", "granted_ai"}.issubset(emitted_sources):
+            break
 
-    if not matches:
-        matches = _score_merge(
-            collected["grants_gov"],
-            collected["usaspending"],
-            collected["granted_ai"],
-            profile=payload,
-            ai_priority=False,
+    # Do not wait for / use the agent's final_output. The collected tool rows
+    # already hold every opportunity (with provider details), so cancel the run
+    # and finalize immediately from what we have — no redundant second pass.
+    try:
+        result.cancel()
+    except Exception:
+        pass
+
+    needed = {"grants_gov", "usaspending", "granted_ai"}
+    if not needed.issubset(emitted_sources):
+        # Agent ended before every source returned — fetch the rest directly so the
+        # final list stays complete.
+        fetched = await fetch_all_sources_async(
+            profile, user_query=user_query, context=payload
         )
-    else:
-        used = {m.get("source") for m in matches}
-        needed = {"grants_gov", "usaspending", "granted_ai"}
-        if not needed.issubset(used):
-            sources = await fetch_all_sources_async(
-                profile, user_query=user_query, context=payload
-            )
-            matches = _merge_source_details(matches, sources)
-            extras: list[dict[str, Any]] = []
-            if sources["granted_ai"] and "granted_ai" not in used:
-                extras.extend(
-                    _score_merge(
-                        [], [], sources["granted_ai"], profile=payload, ai_priority=False
-                    )[:4]
-                )
-            if sources["usaspending"] and "usaspending" not in used:
-                extras.extend(
-                    _score_merge(
-                        [], sources["usaspending"], [], profile=payload, ai_priority=False
-                    )[:4]
-                )
-            if sources["grants_gov"] and "grants_gov" not in used:
-                extras.extend(
-                    _score_merge(
-                        sources["grants_gov"], [], [], profile=payload, ai_priority=False
-                    )[:4]
-                )
-            if extras:
-                matches.extend(extras)
+        for src in needed:
+            if not collected.get(src):
+                collected[src] = fetched.get(src, [])
 
-    if matches:
-        yield {
-            "type": "status",
-            "message": (
-                "Scoring matches with AI against your request"
-                + (
-                    f" ({payload.get('location_state') or 'your location'}"
-                    f", {payload.get('priority_area') or 'your topic'})…"
-                    if payload.get("user_query")
-                    else " (saved profile defaults)…"
-                )
-            ),
-            "location": location,
-        }
-        matches = await _finalize_ranked_matches_async(matches, payload)
+    # Score every collected opportunity locally (instant), rank, and return the
+    # top set — same result the user already saw streaming in, finalized with no
+    # extra wait.
+    all_rows = _filter_actionable_opportunities(
+        collected["grants_gov"] + collected["usaspending"] + collected["granted_ai"]
+    )
+    scored_rows = [
+        _score_grant_against_profile(row, payload, rank_index=i)
+        for i, row in enumerate(all_rows)
+    ]
+    matches = _attach_display_fields(
+        _rank_grouped_by_source(scored_rows, limit=DEFAULT_CANDIDATE_LIMIT)
+    )
     yield _done_event(matches, location)
 
 
