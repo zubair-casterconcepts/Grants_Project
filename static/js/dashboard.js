@@ -298,7 +298,7 @@
       place = `, for ${[city, state].filter(Boolean).join(", ")}`;
     }
     const noun = count === 1 ? "opportunity" : "opportunities";
-    subtitle.textContent = `${count} ranked ${noun} from Grants.gov, USASpending, and GrantedAI${place}`;
+    subtitle.textContent = `${count} eligible ${noun} from Grants.gov and GrantedAI${place}`;
   }
 
   function bindViewMore(hiddenCount) {
@@ -340,7 +340,7 @@
       ${renderSkeleton(3)}
     `;
     if (subtitle) {
-      subtitle.textContent = "Loading ranked opportunities from Grants.gov, USASpending, and GrantedAI…";
+      subtitle.textContent = "Loading eligible opportunities from Grants.gov and GrantedAI…";
     }
 
     try {

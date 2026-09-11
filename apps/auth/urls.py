@@ -12,6 +12,7 @@ urlpatterns = [
     path("home/matches/", views.matches_api_view, name="home_matches"),
     path("home/matches/stream/", views.matches_stream_api_view, name="home_matches_stream"),
     path("home/chat/profile/", views.chat_profile_api, name="chat_profile"),
+    path("home/feedback/", views.grant_feedback_api, name="grant_feedback"),
     path("home/conversations/", views.conversations_api_view, name="conversations"),
     path(
         "home/conversations/<int:conversation_id>/",

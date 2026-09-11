@@ -900,7 +900,8 @@ body.chat-sidebar-collapsed .chat-sidebar-toggle {
   padding: 0.55rem 0.55rem 0.55rem 1.15rem;
   background: #fff;
   border: 1px solid var(--chat-line);
-  border-radius: 999px;
+  /* Pill on one line, but not so round that the curve cuts into multi-line text. */
+  border-radius: 1.85rem;
   box-shadow: none;
 }
 

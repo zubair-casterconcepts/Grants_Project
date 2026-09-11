@@ -291,10 +291,12 @@ async def search_grants_async(
             "org_type": mapped_org,
             "limit": str(effective_limit),
         }
+        # The /grants endpoint rejects our former filters: `status=active` makes it
+        # return HTTP 500 and `state=XX` makes it return no rows at all, which left
+        # this fallback permanently empty. Query + sort work; location is enforced
+        # afterwards by the eligibility gate's geography check.
         grants_params = {
             "q": query,
-            "status": "active",
-            "state": location_state.upper() if location_state else "",
             "limit": str(effective_limit),
             "sort": "relevance",
         }
@@ -345,6 +347,18 @@ async def search_grants_async(
 
         if results:
             _CACHE[key] = (time.time(), results)
+            return results
+
+        # GrantedAI is intermittent: the same request can return rows, an empty
+        # list, or HTTP 429 minutes apart. Rather than silently dropping a whole
+        # source, reuse this query's last good results for a few hours.
+        stale = _CACHE.get(key)
+        if stale and (time.time() - stale[0]) < _CACHE_TTL_SECONDS * 48:
+            logger.warning(
+                "GrantedAI returned no results; serving results cached %.0f min ago",
+                (time.time() - stale[0]) / 60,
+            )
+            return list(stale[1])
         return results
 
     if client is not None:

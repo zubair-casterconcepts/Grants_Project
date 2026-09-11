@@ -3,6 +3,7 @@ from django.contrib.auth.admin import UserAdmin as DjangoUserAdmin
 
 from .models import (
     Conversation,
+    GrantFeedback,
     GrantUser,
     Message,
     Profile,
@@ -113,6 +114,15 @@ class ConversationAdmin(admin.ModelAdmin):
     autocomplete_fields = ("user", "project")
     readonly_fields = ("created_at", "updated_at")
     inlines = [MessageInline]
+
+
+@admin.register(GrantFeedback)
+class GrantFeedbackAdmin(admin.ModelAdmin):
+    list_display = ("title", "user", "verdict", "agency", "category", "created_at")
+    list_filter = ("verdict", "source", "created_at")
+    search_fields = ("title", "agency", "category", "external_id", "user__username")
+    autocomplete_fields = ("user",)
+    readonly_fields = ("created_at", "updated_at")
 
 
 @admin.register(StarterPrompt)

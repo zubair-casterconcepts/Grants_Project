@@ -27,6 +27,8 @@ from typing import Any, Awaitable, Callable, TypeVar
 from pydantic import BaseModel, Field
 
 from services.async_utils import run_sync
+from services.eligibility import filter_eligible
+from services.location_utils import US_STATE_NAMES
 from services.grant_categories import (
     CATEGORY_CHOICES,
     FALLBACK_CATEGORY,
@@ -72,20 +74,22 @@ You are the Grants matching agent. Identify the strongest funding opportunities 
 ## Operating flow
 
 1. Review the profile (topic, priority area, location, budget, org type).
-2. Call grants_gov, usaspending, and granted_ai in the same turn so they can run concurrently.
+2. Call grants_gov and granted_ai in the same turn so they can run concurrently.
 3. Pass keyword, priority_area, location_city, and location_state on every tool call.
 4. For granted_ai, also pass org_type from the profile when available.
-5. Keep only currently open / future opportunities (drop past deadlines and closed/archived statuses), then rank by topic, category, location, then budget.
+5. Check eligibility BEFORE keeping anything: applicant type must include the user's org type, the opportunity must not be restricted to another state, the funding focus must cover their priority area, and it must still be open.
 6. Score each grant 0.0-1.0, set chance_percent to round(score * 100), and add a short reason.
 7. Set category to the grant's own subject area (Education, Arts, Health, Housing, etc.).
 8. Preserve provider fields from tools (agency, agency_address, contacts, amounts, dates).
-9. Return structured matches with source grants_gov, usaspending, or granted_ai.
+9. Return structured matches with source grants_gov or granted_ai.
 
 ## Rules
 
 - Do not invent opportunities, agencies, addresses, amounts, deadlines, or URLs.
 - Do not return opportunities whose deadline has already passed, or closed/archived statuses.
-- If one tool returns no results, continue with the other sources.
+- Drop opportunities the user is not eligible for, even when the topic matches well.
+- Prefer few strong, verified matches over many weak ones.
+- If one tool returns no results, continue with the other source.
 """
 
 
@@ -213,19 +217,33 @@ def _agent_enabled() -> bool:
     return bool(os.getenv("OPENAI_API_KEY", "").strip())
 
 
+def _prompt_context(payload: dict[str, Any]) -> dict[str, Any]:
+    """
+    Search context as shown to the LLM.
+
+    `feedback` is ranking data for the local pipeline, not something the model
+    reasons over — and it holds a `set`, which JSON cannot encode. Serializing it
+    raised TypeError, silently pushing every user who had ever clicked a
+    feedback button off the agent path and onto the fallback.
+    """
+    return {key: value for key, value in payload.items() if key != "feedback"}
+
+
 def _matching_prompt(payload: dict[str, Any], user_query: str = "") -> str:
     return (
         "Run the matching flow for this search context. "
         "DEFAULTS come from the saved user profile. "
         "OVERRIDES come from the latest user message — use overrides when present, "
         "otherwise keep profile defaults for that field. "
-        "Call grants_gov, usaspending, and granted_ai in the SAME turn so they can "
+        "Call grants_gov and granted_ai in the SAME turn so they can "
         "run concurrently. You may omit tool args to use baked-in defaults, or pass "
         "overrides explicitly. "
+        "Only keep opportunities the user is actually eligible for — matching "
+        "applicant type, not restricted to another state, and still open. "
         "Preserve agency name, agency_address, and other provider fields. "
         "Set chance_percent to round(score * 100).\n\n"
         f"USER_QUERY:\n{(user_query or '').strip() or '(none — use all profile defaults)'}\n\n"
-        f"SEARCH_CONTEXT_JSON:\n{json.dumps(payload, indent=2)}"
+        f"SEARCH_CONTEXT_JSON:\n{json.dumps(_prompt_context(payload), indent=2, default=str)}"
     )
 
 
@@ -496,7 +514,7 @@ def _location_score(profile: dict[str, Any], row: dict[str, Any]) -> tuple[float
     reasons: list[str] = []
     p_state = str(profile.get("location_state") or "").strip().upper()
     p_city = str(profile.get("location_city") or "").strip().lower()
-    hay = " ".join(
+    raw = " ".join(
         [
             str(row.get("pop_state") or ""),
             str(row.get("state") or ""),
@@ -506,21 +524,32 @@ def _location_score(profile: dict[str, Any], row: dict[str, Any]) -> tuple[float
             str(row.get("title") or ""),
             str(row.get("description") or ""),
         ]
-    ).lower()
+    )
+    hay = raw.lower()
 
     if not p_state and not p_city:
         return 0.45, reasons
 
     score = 0.2
-    if p_state and (
-        p_state.lower() in hay
-        or f" {p_state.lower()} " in f" {hay} "
-        or str(row.get("pop_state") or "").strip().upper() == p_state
-        or str(row.get("state") or "").strip().upper() == p_state
-    ):
-        score = 0.9
-        reasons.append(f"location matches {p_state}")
-    if p_city and p_city in hay:
+    if p_state:
+        # A two-letter code must never be matched as a substring: "MI" would
+        # otherwise hit "adMInistration", "MIssion" and "comMIttee", which is how
+        # foreign programs used to score as Michigan matches.
+        state_name = US_STATE_NAMES.get(p_state, "").lower()
+        matched = (
+            str(row.get("pop_state") or "").strip().upper() == p_state
+            or str(row.get("state") or "").strip().upper() == p_state
+            # Uppercase code as written, e.g. "Detroit, MI".
+            or re.search(rf"\b{re.escape(p_state)}\b", raw) is not None
+            or (
+                bool(state_name)
+                and re.search(rf"\b{re.escape(state_name)}\b", hay) is not None
+            )
+        )
+        if matched:
+            score = 0.9
+            reasons.append(f"location matches {p_state}")
+    if p_city and re.search(rf"\b{re.escape(p_city)}\b", hay):
         score = min(1.0, score + 0.1)
         if "location matches" not in " ".join(reasons):
             reasons.append(f"near {profile.get('location_city')}")
@@ -550,6 +579,27 @@ def _budget_score(profile: dict[str, Any], row: dict[str, Any]) -> tuple[float, 
 
     ceiling = _parse_money(row.get("award_ceiling") or row.get("amount"))
     floor = _parse_money(row.get("award_floor"))
+
+    # A stated range ("50,000 to 300,000"): the award fits when it overlaps it.
+    try:
+        wanted_max = float(
+            str(profile.get("budget_max") or "").replace(",", "").replace("$", "").strip()
+            or 0
+        )
+    except (TypeError, ValueError):
+        wanted_max = 0.0
+    if wanted_max > 0 and requested > 0:
+        if ceiling is None and floor is None:
+            return 0.48, reasons
+        top = ceiling if ceiling is not None else floor
+        bottom = floor if floor is not None else 0.0
+        if top >= requested and bottom <= wanted_max:
+            reasons.append("award size fits your budget range")
+            return 0.88, reasons
+        if top >= requested * 0.5 and bottom <= wanted_max * 1.5:
+            reasons.append("award size near your budget range")
+            return 0.6, reasons
+        return 0.3, reasons
 
     if requested <= 0:
         return 0.5, reasons
@@ -727,8 +777,15 @@ def _neutral_rows(matches: list[dict[str, Any]]) -> list[dict[str, Any]]:
 DEFAULT_RESULT_LIMIT = 12
 DEFAULT_CANDIDATE_LIMIT = 18
 
+# Sources that may be RECOMMENDED (i.e. "you can apply for this").
+# USASpending is deliberately absent: it returns `spending_by_award` rows —
+# money already paid to a named recipient — which grant writers reported as the
+# main source of "long shots that turn out ineligible". Its client is kept for
+# funding-intelligence use, just never as an opportunity. See services/eligibility.py.
+RECOMMENDATION_SOURCES = ("grants_gov", "granted_ai")
+
 # Sources are shown grouped in this order, each section sorted on its own.
-_SOURCE_DISPLAY_ORDER = ("grants_gov", "usaspending", "granted_ai")
+_SOURCE_DISPLAY_ORDER = RECOMMENDATION_SOURCES
 
 
 def _rank_grouped_by_source(
@@ -744,13 +801,35 @@ def _rank_grouped_by_source(
     grouped: dict[str, list[dict[str, Any]]] = {}
     for row in matches:
         grouped.setdefault(str(row.get("source") or ""), []).append(row)
+    for src in list(grouped):
+        grouped[src] = _rank_by_chance(grouped[src])
+
+    order = [src for src in _SOURCE_DISPLAY_ORDER if src in grouped]
+    order += [src for src in grouped if src not in _SOURCE_DISPLAY_ORDER]
+    if not order:
+        return []
+
+    cap = max(1, int(limit or DEFAULT_CANDIDATE_LIMIT))
+    # Fair share first, so a source that returns many rows can never crowd out a
+    # better-scoring one just because it is listed earlier.
+    share = max(1, cap // len(order))
+    selected: dict[str, list[dict[str, Any]]] = {
+        src: grouped[src][:share] for src in order
+    }
+    used = sum(len(rows) for rows in selected.values())
+
+    # Spare slots go to the best remaining rows, whatever the source.
+    if used < cap:
+        leftovers: list[dict[str, Any]] = []
+        for src in order:
+            leftovers.extend(grouped[src][len(selected[src]) :])
+        for row in _rank_by_chance(leftovers)[: cap - used]:
+            selected[str(row.get("source") or "")].append(row)
+
     ordered: list[dict[str, Any]] = []
-    for src in _SOURCE_DISPLAY_ORDER:
-        ordered.extend(_rank_by_chance(grouped.pop(src, [])))
-    # Any other/unknown sources keep a stable, sorted tail.
-    for src in list(grouped.keys()):
-        ordered.extend(_rank_by_chance(grouped.pop(src)))
-    return ordered[: max(1, int(limit or DEFAULT_CANDIDATE_LIMIT))]
+    for src in order:
+        ordered.extend(_rank_by_chance(selected[src]))
+    return ordered[:cap]
 
 
 def _merge_score_rows(
@@ -1110,11 +1189,14 @@ def _source_coroutines(
             logger.warning("granted_ai fallback fetch failed", exc_info=True)
             return []
 
-    return {
+    # Only recommendation sources are fetched. Skipping USASpending also removes
+    # the slowest upstream call, so search returns sooner.
+    available = {
         "grants_gov": _gov,
         "usaspending": _usa,
         "granted_ai": _granted,
     }
+    return {name: available[name] for name in RECOMMENDATION_SOURCES}
 
 
 # Backward-compatible alias used by older call sites / commands.
@@ -1165,6 +1247,223 @@ def fetch_all_sources(
     )
 
 
+def _relevance_floor() -> float:
+    """Minimum score an opportunity must reach to be recommended at all."""
+    raw = os.getenv("GRANT_MIN_RELEVANCE", "0.45").strip()
+    try:
+        return max(0.0, min(1.0, float(raw)))
+    except ValueError:
+        return 0.45
+
+
+def _apply_feedback(
+    row: dict[str, Any],
+    feedback: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """
+    Fold a user's past Eligible / Not-eligible marks into this row.
+
+    Returns None when the row should be suppressed outright (the user already
+    told us this exact opportunity is not a fit). Otherwise nudges the score by
+    what they have accepted or rejected from the same funder / category before.
+    """
+    if not feedback:
+        return row
+
+    # Must match how the feedback row was stored (external_id is capped at 255).
+    external_id = str(
+        row.get("id") or row.get("number") or row.get("url") or row.get("title") or ""
+    )[:255]
+    if f"{row.get('source') or ''}:{external_id}" in (
+        feedback.get("suppressed_keys") or ()
+    ):
+        return None
+
+    agency = str(row.get("agency") or row.get("top_agency") or "").strip().lower()
+    category = str(row.get("category") or "").strip().lower()
+    delta = 0.0
+    notes: list[str] = []
+
+    if agency:
+        if agency in (feedback.get("negative_agencies") or {}):
+            delta -= 0.18
+            notes.append("you marked this funder as not a fit before")
+        elif agency in (feedback.get("positive_agencies") or {}):
+            delta += 0.10
+            notes.append("you liked this funder before")
+    if category:
+        if category in (feedback.get("negative_categories") or {}):
+            delta -= 0.10
+        elif category in (feedback.get("positive_categories") or {}):
+            delta += 0.06
+
+    if not delta:
+        return row
+
+    out = dict(row)
+    try:
+        score = float(out.get("score") or 0.0)
+    except (TypeError, ValueError):
+        score = 0.0
+    score = max(0.05, min(0.99, score + delta))
+    out["score"] = round(score, 2)
+    out["chance_percent"] = int(round(score * 100))
+    tier = _chance_tier(score)
+    out["chance_tier"] = tier
+    out["chance_label"] = _chance_label(tier)
+    if notes:
+        out["reason"] = "; ".join([str(out.get("reason") or ""), *notes]).strip("; ")
+    return out
+
+
+_DUPLICATE_STATUS_RANK = {"posted": 0, "open": 0, "active": 0, "forecasted": 1, "forecast": 1}
+
+
+def _duplicate_rank(row: dict[str, Any]) -> tuple[int, int, int]:
+    status = str(row.get("opp_status") or "").strip().lower()
+    return (
+        _DUPLICATE_STATUS_RANK.get(status, 2),
+        0 if str(row.get("deadline") or "").strip() else 1,
+        0 if str(row.get("eligibility") or "").strip() else 1,
+    )
+
+
+def _dedupe_opportunities(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """
+    One card per opportunity.
+
+    Grants.gov lists a forecast and its later posted notice as separate records
+    with the same title and agency, which rendered as duplicate cards. Keep the
+    most actionable copy: posted over forecasted, then the one with a deadline,
+    then the one with published eligibility.
+    """
+    chosen: dict[tuple[str, str], dict[str, Any]] = {}
+    order: list[tuple[str, str]] = []
+    for row in rows:
+        title = re.sub(r"[^a-z0-9]+", " ", str(row.get("title") or "").lower()).strip()
+        agency = re.sub(
+            r"[^a-z0-9]+", " ", str(row.get("agency") or row.get("top_agency") or "").lower()
+        ).strip()
+        if title:
+            key = (title, agency)
+        else:
+            key = (str(row.get("source") or ""), str(row.get("id") or row.get("number") or len(order)))
+        current = chosen.get(key)
+        if current is None:
+            chosen[key] = row
+            order.append(key)
+        elif _duplicate_rank(row) < _duplicate_rank(current):
+            chosen[key] = row
+    return [chosen[key] for key in order]
+
+
+def _subject_terms(payload: dict[str, Any]) -> set[str]:
+    """Distinctive words the user typed as the subject of this search."""
+    from services.eligibility import subject_terms
+
+    overrides = payload.get("overrides") or {}
+    return subject_terms(str(overrides.get("keyword") or ""))
+
+
+def _mentions_term(words: set[str], term: str) -> bool:
+    # Share a stem for longer words, so "mentorship" also finds "mentoring".
+    if len(term) >= 7:
+        stem = term[:6]
+        return any(word.startswith(stem) for word in words)
+    return term in words
+
+
+def _apply_subject_focus(row: dict[str, Any], terms: set[str]) -> dict[str, Any]:
+    """
+    Rank opportunities about what the user asked for above ones that only share
+    a category. "after school tutoring for K-8" should not lead with university
+    research awards filed under Education. A score nudge, not a hard filter —
+    the eligibility gate already removed what cannot apply.
+    """
+    if not terms:
+        return row
+    title_words = set(re.findall(r"[a-z][a-z0-9\-]+", str(row.get("title") or "").lower()))
+    body_words = set(
+        re.findall(
+            r"[a-z][a-z0-9\-]+",
+            " ".join(
+                str(row.get(key) or "")
+                for key in ("description", "funding_categories", "eligibility")
+            ).lower(),
+        )
+    )
+    in_title = {term for term in terms if _mentions_term(title_words, term)}
+    in_body = {term for term in terms - in_title if _mentions_term(body_words, term)}
+
+    out = dict(row)
+    if in_title or in_body:
+        delta = min(0.15, 0.06 * len(in_title) + 0.03 * len(in_body))
+        note = f"mentions {', '.join(sorted(in_title or in_body)[:2])}"
+        out["reason"] = "; ".join(part for part in (str(out.get("reason") or ""), note) if part)
+    else:
+        delta = -0.15
+    score = max(0.05, min(0.99, float(out.get("score") or 0.0) + delta))
+    out["score"] = round(score, 2)
+    out["chance_percent"] = int(round(score * 100))
+    tier = _chance_tier(score)
+    out["chance_tier"] = tier
+    out["chance_label"] = _chance_label(tier)
+    return out
+
+
+def build_recommendations(
+    collected: dict[str, list[dict[str, Any]]],
+    payload: dict[str, Any],
+    *,
+    limit: int = DEFAULT_CANDIDATE_LIMIT,
+    feedback: dict[str, Any] | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """
+    Turn raw source rows into the final recommendation list.
+
+    Order matters: drop stale, merge duplicates, hard-drop ineligible, then score
+    what is left. Grant writers asked for eligibility to be settled *before*
+    anything is recommended, so nothing ineligible can survive on a high score.
+
+    Returns (recommendations, stats) where stats explains what was filtered.
+    """
+    raw: list[dict[str, Any]] = []
+    for source in RECOMMENDATION_SOURCES:
+        raw.extend(collected.get(source) or [])
+
+    actionable = _filter_actionable_opportunities(raw)
+    fresh = _dedupe_opportunities(actionable)
+    eligible, dropped = filter_eligible(fresh, payload)
+
+    terms = _subject_terms(payload)
+    scored: list[dict[str, Any]] = []
+    for index, row in enumerate(eligible):
+        graded = _score_grant_against_profile(row, payload, rank_index=index)
+        graded = _apply_subject_focus(graded, terms)
+        graded = _apply_feedback(graded, feedback)
+        if graded is not None:
+            scored.append(graded)
+
+    floor = _relevance_floor()
+    relevant = [row for row in scored if float(row.get("score") or 0.0) >= floor]
+    # Never return an empty board purely because the bar was high — if nothing
+    # clears it, show the best of what remains so the user still has a starting
+    # point (clearly ranked lowest).
+    if not relevant and scored:
+        relevant = _rank_by_chance(scored)[:limit]
+
+    stats = {
+        "fetched": len(raw),
+        "stale_dropped": len(raw) - len(actionable),
+        "duplicates_merged": len(actionable) - len(fresh),
+        "ineligible_dropped": len(dropped),
+        "below_relevance": max(0, len(scored) - len(relevant)),
+        "suppressed_by_feedback": max(0, len(eligible) - len(scored)),
+    }
+    ranked = _attach_display_fields(_rank_grouped_by_source(relevant, limit=limit))
+    return ranked, stats
+
+
 _SOURCE_LABELS = {
     "grants_gov": "Grants.gov",
     "usaspending": "USASpending",
@@ -1177,16 +1476,24 @@ def _score_one_source(
     rows: list[dict[str, Any]],
     profile: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    """Score a single source for progressive UI (local peek; final merge uses AI)."""
-    if source == "grants_gov":
-        scored = _score_merge(rows, [], [], profile=profile, ai_priority=False)
-    elif source == "usaspending":
-        scored = _score_merge([], rows, [], profile=profile, ai_priority=False)
-    elif source == "granted_ai":
-        scored = _score_merge([], [], rows, profile=profile, ai_priority=False)
-    else:
-        scored = []
-    return scored[:5]
+    """
+    Preview cards for one source while the others are still loading.
+
+    Runs the same freshness → eligibility → scoring → feedback pipeline as the
+    final list, just for this source. Previews used to be unscreened, so an
+    ineligible grant could flash on screen before the final list removed it —
+    and preview scores (a flat 0.50) jumped when the final scores arrived.
+    """
+    if source not in RECOMMENDATION_SOURCES or not rows:
+        return []
+    context = profile if isinstance(profile, dict) else {}
+    preview, _ = build_recommendations(
+        {source: rows},
+        context,
+        limit=5,
+        feedback=context.get("feedback"),
+    )
+    return preview
 
 
 def _status_override_note(payload: dict[str, Any]) -> str:
@@ -1219,12 +1526,12 @@ def _initial_status_event(payload: dict[str, Any], *, agent: bool) -> dict[str, 
     overrides = payload.get("overrides") or {}
     if agent:
         message = (
-            "Agent is querying Grants.gov, USASpending, and GrantedAI concurrently…"
+            "Searching Grants.gov and GrantedAI and screening for eligibility…"
             + _status_override_note(payload)
         )
     else:
         message = (
-            "Searching Grants.gov, USASpending, and GrantedAI concurrently…"
+            "Searching Grants.gov and GrantedAI and screening for eligibility…"
             + _status_override_note(payload)
         )
     return {
@@ -1246,6 +1553,8 @@ def _initial_status_event(payload: dict[str, Any], *, agent: bool) -> dict[str, 
 def _done_event(
     final: list[dict[str, Any]],
     location: dict[str, str],
+    *,
+    stats: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     high = sum(1 for m in final if m.get("chance_tier") == "high")
     medium = sum(1 for m in final if m.get("chance_tier") == "medium")
@@ -1255,13 +1564,31 @@ def _done_event(
             f"({high} high, {medium} medium chance)."
         )
     else:
-        done_message = "No ranked matches yet for your project."
+        done_message = "No eligible matches for your project right now."
+
+    # Say plainly what was screened out — grant writers asked to know that the
+    # noise was removed on purpose, not that the search simply found little.
+    screened = 0
+    note = ""
+    if stats:
+        screened = int(stats.get("ineligible_dropped", 0)) + int(
+            stats.get("below_relevance", 0)
+        )
+        if screened:
+            note = (
+                f"Screened out {screened} opportunit"
+                f"{'y' if screened == 1 else 'ies'} that didn't meet your "
+                "eligibility, location, or focus."
+            )
     return {
         "type": "done",
         "message": done_message,
         "matches": final,
         "match_count": len(final),
         "location": location,
+        "stats": stats or {},
+        "screened_out": screened,
+        "screened_note": note,
     }
 
 
@@ -1279,9 +1606,7 @@ async def _aiter_fallback_events(
 
     jobs = _source_coroutines(profile, user_query=user_query, context=payload)
     collected: dict[str, list[dict[str, Any]]] = {
-        "grants_gov": [],
-        "usaspending": [],
-        "granted_ai": [],
+        source: [] for source in RECOMMENDATION_SOURCES
     }
     tasks = {name: asyncio.create_task(fn()) for name, fn in jobs.items()}
     name_by_task = {task: name for name, task in tasks.items()}
@@ -1312,19 +1637,14 @@ async def _aiter_fallback_events(
                 "location": location,
             }
 
-    # Score every collected opportunity locally (instant) and rank — results are
-    # final as soon as the sources return, with no redundant second pass.
-    all_rows = _filter_actionable_opportunities(
-        collected["grants_gov"] + collected["usaspending"] + collected["granted_ai"]
+    # Freshness → eligibility → scoring, instantly and in that order.
+    final, stats = build_recommendations(
+        collected,
+        payload,
+        limit=DEFAULT_CANDIDATE_LIMIT,
+        feedback=payload.get("feedback"),
     )
-    scored_rows = [
-        _score_grant_against_profile(row, payload, rank_index=i)
-        for i, row in enumerate(all_rows)
-    ]
-    final = _attach_display_fields(
-        _rank_grouped_by_source(scored_rows, limit=DEFAULT_CANDIDATE_LIMIT)
-    )
-    yield _done_event(final, location)
+    yield _done_event(final, location, stats=stats)
 
 
 async def _aiter_agent_events(
@@ -1351,9 +1671,7 @@ async def _aiter_agent_events(
     )
 
     collected: dict[str, list[dict[str, Any]]] = {
-        "grants_gov": [],
-        "usaspending": [],
-        "granted_ai": [],
+        source: [] for source in RECOMMENDATION_SOURCES
     }
     call_map: dict[str, str] = {}
     emitted_sources: set[str] = set()
@@ -1416,7 +1734,7 @@ async def _aiter_agent_events(
         # Stop here instead of waiting for the agent to generate its full final
         # output — that generation was the second "loading" the user saw after the
         # first results appeared, and we re-rank locally anyway.
-        if {"grants_gov", "usaspending", "granted_ai"}.issubset(emitted_sources):
+        if set(RECOMMENDATION_SOURCES).issubset(emitted_sources):
             break
 
     # Do not wait for / use the agent's final_output. The collected tool rows
@@ -1427,7 +1745,7 @@ async def _aiter_agent_events(
     except Exception:
         pass
 
-    needed = {"grants_gov", "usaspending", "granted_ai"}
+    needed = set(RECOMMENDATION_SOURCES)
     if not needed.issubset(emitted_sources):
         # Agent ended before every source returned — fetch the rest directly so the
         # final list stays complete.
@@ -1438,31 +1756,32 @@ async def _aiter_agent_events(
             if not collected.get(src):
                 collected[src] = fetched.get(src, [])
 
-    # Score every collected opportunity locally (instant), rank, and return the
-    # top set — same result the user already saw streaming in, finalized with no
-    # extra wait.
-    all_rows = _filter_actionable_opportunities(
-        collected["grants_gov"] + collected["usaspending"] + collected["granted_ai"]
+    # Freshness → eligibility → scoring, instantly and in that order.
+    matches, stats = build_recommendations(
+        collected,
+        payload,
+        limit=DEFAULT_CANDIDATE_LIMIT,
+        feedback=payload.get("feedback"),
     )
-    scored_rows = [
-        _score_grant_against_profile(row, payload, rank_index=i)
-        for i, row in enumerate(all_rows)
-    ]
-    matches = _attach_display_fields(
-        _rank_grouped_by_source(scored_rows, limit=DEFAULT_CANDIDATE_LIMIT)
-    )
-    yield _done_event(matches, location)
+    yield _done_event(matches, location, stats=stats)
 
 
 async def aiter_grant_matching_events(
     profile: Any,
     user_query: str = "",
+    *,
+    feedback: dict[str, Any] | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     """
     Async progressive match events for SSE.
     Primary: Agents SDK streamed tool calls. Fallback: asyncio.gather sources.
+
+    `feedback` carries the user's past Eligible / Not-eligible verdicts so
+    rejected opportunities are suppressed and rejected funders rank lower.
     """
     payload = _search_context(profile, user_query)
+    if feedback:
+        payload["feedback"] = feedback
     if _agent_enabled():
         try:
             async for event in _aiter_agent_events(profile, user_query, payload):
@@ -1480,10 +1799,14 @@ async def aiter_grant_matching_events(
 def iter_grant_matching_events(
     profile: Any,
     user_query: str = "",
+    *,
+    feedback: dict[str, Any] | None = None,
 ) -> Iterator[dict[str, Any]]:
     """Sync bridge for Django StreamingHttpResponse SSE."""
     yield from _iter_async_generator(
-        aiter_grant_matching_events(profile, user_query=user_query)
+        aiter_grant_matching_events(
+            profile, user_query=user_query, feedback=feedback
+        )
     )
 
 
@@ -1559,19 +1882,16 @@ def build_grant_agent(defaults: dict[str, Any] | None = None):
     """
     from agents import Agent
 
-    from services.tools import (
-        build_granted_ai_tool,
-        build_grants_gov_tool,
-        build_usaspending_tool,
-    )
+    from services.tools import build_granted_ai_tool, build_grants_gov_tool
 
+    # Only recommendation sources are registered — USASpending returns awards
+    # already paid out, which must never be offered as something to apply for.
     tool_defaults = dict(defaults or {})
     return Agent(
         name="Grant Matching Agent",
         instructions=load_agent_instructions(),
         tools=[
             build_grants_gov_tool(tool_defaults),
-            build_usaspending_tool(tool_defaults),
             build_granted_ai_tool(tool_defaults),
         ],
         output_type=GrantMatchResult,
@@ -1584,6 +1904,7 @@ async def run_grant_matching_agent_async(
     user_query: str = "",
     *,
     max_results: int | None = None,
+    feedback: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """
     Async matching: Agents SDK tools first, asyncio.gather fallback.
@@ -1592,108 +1913,32 @@ async def run_grant_matching_agent_async(
     """
     payload = _search_context(profile, user_query)
     limit = max(1, int(max_results or DEFAULT_RESULT_LIMIT))
+    if feedback is not None:
+        payload["feedback"] = feedback
 
-    async def _fallback() -> list[dict[str, Any]]:
-        sources = await fetch_all_sources_async(
-            profile,
-            user_query=user_query,
-            context=payload,
-            result_limit=limit,
+    # Same pipeline the chat stream uses: fetch the recommendation sources
+    # concurrently, then freshness → eligibility → scoring. Keeping one path
+    # means a weekly digest can never recommend something the chat would have
+    # screened out as ineligible.
+    sources = await fetch_all_sources_async(
+        profile,
+        user_query=user_query,
+        context=payload,
+        result_limit=limit,
+    )
+    matches, stats = build_recommendations(
+        sources,
+        payload,
+        limit=limit,
+        feedback=payload.get("feedback"),
+    )
+    if stats.get("ineligible_dropped"):
+        logger.info(
+            "Eligibility gate removed %s of %s opportunities",
+            stats["ineligible_dropped"],
+            stats.get("fetched", 0),
         )
-        return await _finalize_ranked_matches_async(
-            _score_merge(
-                sources["grants_gov"],
-                sources["usaspending"],
-                sources["granted_ai"],
-                profile=payload,
-                ai_priority=False,
-                result_limit=limit,
-            ),
-            payload,
-            result_limit=limit,
-        )
-
-    if not _agent_enabled():
-        return await _fallback()
-
-    try:
-        from agents import Runner
-
-        agent = build_grant_agent(payload)
-        result = await Runner.run(
-            agent, _matching_prompt(payload, user_query), max_turns=12
-        )
-        final = result.final_output
-
-        matches: list[dict[str, Any]] = []
-        if isinstance(final, GrantMatchResult):
-            matches = [m.model_dump() for m in final.matches]
-        elif isinstance(final, dict) and "matches" in final:
-            matches = list(final.get("matches") or [])
-        matches = _filter_actionable_opportunities(matches)
-
-        if not matches:
-            logger.info("Agent returned no matches; using async fallback merge")
-            return await _fallback()
-
-        matches.sort(key=lambda m: float(m.get("score") or 0), reverse=True)
-
-        used = {m.get("source") for m in matches}
-        needed = {"grants_gov", "usaspending", "granted_ai"}
-        if not needed.issubset(used):
-            sources = await fetch_all_sources_async(
-                profile,
-                user_query=user_query,
-                context=payload,
-                result_limit=limit,
-            )
-            matches = _merge_source_details(matches, sources)
-            extras: list[dict[str, Any]] = []
-            # Keep more extras when the caller asks for a larger digest board.
-            extra_each = max(4, min(10, limit // 3 or 4))
-            if sources["granted_ai"] and "granted_ai" not in used:
-                extras.extend(
-                    _score_merge(
-                        [],
-                        [],
-                        sources["granted_ai"],
-                        profile=payload,
-                        ai_priority=False,
-                        result_limit=extra_each,
-                    )[:extra_each]
-                )
-            if sources["usaspending"] and "usaspending" not in used:
-                extras.extend(
-                    _score_merge(
-                        [],
-                        sources["usaspending"],
-                        [],
-                        profile=payload,
-                        ai_priority=False,
-                        result_limit=extra_each,
-                    )[:extra_each]
-                )
-            if sources["grants_gov"] and "grants_gov" not in used:
-                extras.extend(
-                    _score_merge(
-                        sources["grants_gov"],
-                        [],
-                        [],
-                        profile=payload,
-                        ai_priority=False,
-                        result_limit=extra_each,
-                    )[:extra_each]
-                )
-            if extras:
-                matches.extend(extras)
-                matches.sort(key=lambda m: float(m.get("score") or 0), reverse=True)
-
-        return await _finalize_ranked_matches_async(
-            matches, payload, result_limit=limit
-        )
-    except Exception:
-        logger.exception("Grant agent failed; using async merged fallback")
-        return await _fallback()
+    return matches
 
 
 def run_grant_matching_agent(
@@ -1701,10 +1946,14 @@ def run_grant_matching_agent(
     user_query: str = "",
     *,
     max_results: int | None = None,
+    feedback: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Sync bridge for /home/matches/ JSON endpoint and weekly digests."""
     return _run_async(
         run_grant_matching_agent_async(
-            profile, user_query=user_query, max_results=max_results
+            profile,
+            user_query=user_query,
+            max_results=max_results,
+            feedback=feedback,
         )
     )

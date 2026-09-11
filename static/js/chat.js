@@ -19,6 +19,7 @@
   const conversationsUrl =
     app.dataset.conversationsUrl || "/home/conversations/";
   const saveUrl = app.dataset.saveUrl || "/accounts/saved/add/";
+  const feedbackUrl = app.dataset.feedbackUrl || "/home/feedback/";
   const homeUrl = app.dataset.homeUrl || "/home/";
   const csrfToken =
     app.dataset.csrfToken ||
@@ -677,7 +678,7 @@
     if (starterCopyEl) {
       starterCopyEl.textContent = onboarded
         ? `Tell me about ${projectTitle} and I'll find matching opportunities, help you refine details, and save the best fits.`
-        : "Answer a few quick questions about your organization and project, then I'll search Grants.gov, USASpending, and GrantedAI.";
+        : "Answer a few quick questions about your organization and project, then I'll search Grants.gov and GrantedAI for opportunities you're eligible for.";
     }
 
     const cards = onboarded
@@ -796,6 +797,7 @@
       Promise.resolve(row).then((el) => {
         if (!el) return;
         bindSaveForms(el);
+        bindFeedbackButtons(el);
         bindMatchToolbar(el);
         showMatchToolbar(el);
       });
@@ -1316,6 +1318,64 @@
     return { score, chance, tier, chanceLabel };
   }
 
+  // Eligible / Not-eligible marks. These teach the matcher: a "Not eligible"
+  // hides that opportunity next time and down-ranks funders the user keeps
+  // rejecting, which is what grant writers asked for.
+  const FEEDBACK_OPTIONS = [
+    {
+      verdict: "good_match",
+      label: "Good match",
+      title: "Eligible and relevant — show me more like this",
+      icon: `<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m5 12.5 4.2 4.2L19 7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+    },
+    {
+      verdict: "not_eligible",
+      label: "Not eligible",
+      title: "We can't apply for this — stop showing it",
+      icon: `<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="8" stroke="currentColor" stroke-width="1.9"/><path d="m8.6 8.6 6.8 6.8" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg>`,
+    },
+    {
+      verdict: "irrelevant",
+      label: "Not relevant",
+      title: "Eligible, but not the kind of work we do",
+      icon: `<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>`,
+    },
+  ];
+
+  function renderFeedbackControls(match) {
+    const current = String(match.user_feedback || "");
+    const buttons = FEEDBACK_OPTIONS.map((option) => {
+      const active = current === option.verdict ? " is-active" : "";
+      return `
+        <button
+          type="button"
+          class="feedback-btn feedback-${attr(option.verdict)}${active}"
+          data-verdict="${attr(option.verdict)}"
+          title="${attr(option.title)}"
+          aria-pressed="${current === option.verdict ? "true" : "false"}"
+        >
+          <span class="feedback-btn-icon" aria-hidden="true">${option.icon}</span>
+          <span>${escapeHtml(option.label)}</span>
+        </button>
+      `;
+    }).join("");
+    return `
+      <div
+        class="match-feedback"
+        data-feedback-for="${attr(matchKey(match))}"
+        data-source="${attr(match.source || "")}"
+        data-external-id="${attr(match.save_external_id || match.id || match.number || match.url || match.title || "")}"
+        data-title="${attr(match.title || "")}"
+        data-agency="${attr(match.agency || match.top_agency || "")}"
+        data-category="${attr(match.category || "")}"
+        data-pop-state="${attr(match.pop_state || match.state || "")}"
+      >
+        <span class="match-feedback-label">Is this a fit?</span>
+        ${buttons}
+      </div>
+    `;
+  }
+
   function renderCard(match, index) {
     const { score, chance, tier, chanceLabel } = chanceMeta(match);
     const titleHtml = match.url
@@ -1328,7 +1388,7 @@
     const reason = String(match.reason || "").trim();
 
     return `
-      <article class="match-card chance-${attr(tier)}" style="--i: ${index}" data-match-key="${attr(matchKey(match))}">
+      <article class="match-card chance-${attr(tier)}${["not_eligible", "irrelevant"].includes(String(match.user_feedback || "")) ? " is-dismissed" : ""}" style="--i: ${index}" data-match-key="${attr(matchKey(match))}">
         <div class="score-badge" title="${attr(chanceLabel)} (${chance}%)" aria-label="Match score ${score}, ${chanceLabel}">${escapeHtml(score)}</div>
         <div class="match-content">
           <div class="match-head">
@@ -1342,6 +1402,7 @@
           </div>
           ${reason ? `<p class="match-reason">${escapeHtml(reason)}</p>` : `<p class="match-reason" hidden></p>`}
           <div class="match-footer">
+            ${renderFeedbackControls(match)}
             <div class="match-actions">
               ${match.url ? `<a class="btn-view" href="${attr(match.url)}" target="_blank" rel="noopener noreferrer">View</a>` : ""}
               ${renderSaveControls(match)}
@@ -1411,6 +1472,71 @@
     link.textContent = "";
     if (icon) link.appendChild(icon);
     link.appendChild(document.createTextNode(` Saved (${count})`));
+  }
+
+  // Delegated so cards added later (streaming, reorder) stay wired up.
+  function bindFeedbackButtons(root) {
+    if (!root || root.dataset.feedbackBound === "true") return;
+    root.dataset.feedbackBound = "true";
+    root.addEventListener("click", async (event) => {
+      const button = event.target.closest(".feedback-btn");
+      if (!button || !root.contains(button)) return;
+      event.preventDefault();
+
+      const card = button.closest(".match-card");
+      const group = button.closest(".match-feedback");
+      if (!card || !group || group.dataset.busy === "true") return;
+
+      // Everything the endpoint needs lives on the card. The live result list
+      // (`displayedMatches`) is local to loadMatches — referencing it here threw
+      // a ReferenceError on every click — and it never exists for cards
+      // restored from chat history.
+      const grant = group.dataset;
+      if (!grant.source || !grant.externalId) return;
+
+      const verdict = button.dataset.verdict || "";
+      group.dataset.busy = "true";
+      try {
+        const response = await fetch(feedbackUrl, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "application/json",
+            "X-CSRFToken": csrfToken,
+            "X-Requested-With": "XMLHttpRequest",
+          },
+          credentials: "same-origin",
+          body: JSON.stringify({
+            source: grant.source,
+            external_id: grant.externalId,
+            verdict,
+            title: grant.title || "",
+            agency: grant.agency || "",
+            category: grant.category || "",
+            pop_state: grant.popState || "",
+          }),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || !data.ok) throw new Error("feedback_failed");
+
+        const applied = data.verdict || "";
+        group.querySelectorAll(".feedback-btn").forEach((btn) => {
+          const on = btn.dataset.verdict === applied;
+          btn.classList.toggle("is-active", on);
+          btn.setAttribute("aria-pressed", on ? "true" : "false");
+        });
+        // A rejected opportunity stays visible now (so the click reads as
+        // acknowledged) but is filtered out of the next search.
+        card.classList.toggle(
+          "is-dismissed",
+          applied === "not_eligible" || applied === "irrelevant"
+        );
+      } catch (_) {
+        /* leave the buttons as they were */
+      } finally {
+        group.dataset.busy = "false";
+      }
+    });
   }
 
   function bindSaveForms(root) {
@@ -1683,6 +1809,7 @@
       }
       if (cardIndex === beforeCount) return;
       bindSaveForms(resultsRow);
+        bindFeedbackButtons(resultsRow);
       if (!hasVisibleCards) {
         hasVisibleCards = true;
         // Drop the start Thinking block once cards arrive — do not keep it at the end.
@@ -1700,13 +1827,17 @@
       }
     };
 
-    const renderFinal = async (matches, location, savedCount) => {
+    const renderFinal = async (matches, location, savedCount, screenedNote) => {
       const placeText = placeTextFrom(location);
       const finalMatches = Array.isArray(matches) ? matches : [];
-      if (!finalMatches.length && !displayedMatches.length) {
+      // The final list is authoritative. If eligibility screening removed
+      // everything, clear any preview cards too — never leave unscreened cards
+      // on screen under an "eligible opportunities" heading.
+      if (!finalMatches.length) {
         const emptyAnchor = captureScrollAnchor();
         if (resultsRow) removeNode(resultsRow);
-        const emptyMsg = `I couldn't find ranked matches yet${placeText}. You can update your project details in chat, then ask me to search again.`;
+        const screened = screenedNote ? ` ${screenedNote}` : "";
+        const emptyMsg = `I couldn't find eligible opportunities for this search${placeText}.${screened} Try broadening the topic, or update your project details and search again.`;
         await setStatus(emptyMsg);
         restoreScrollAnchor(emptyAnchor);
         await persistMessage("assistant", emptyMsg);
@@ -1765,11 +1896,14 @@
 
       const total = displayedMatches.length || finalMatches.length;
       const noun = total === 1 ? "opportunity" : "opportunities";
-      const summary = `Here are ${total} ${noun} from Grants.gov, USASpending, and GrantedAI${placeText}.`;
+      const summary = `Here are ${total} eligible ${noun} from Grants.gov and GrantedAI${placeText}.`;
       if (summaryEl) summaryEl.textContent = summary;
-      setProgressNote("");
+      // Say what was screened out, so a short list reads as "we filtered the
+      // noise" rather than "the search found almost nothing".
+      setProgressNote(screenedNote || "");
       hasVisibleCards = true;
       bindSaveForms(resultsRow);
+      bindFeedbackButtons(resultsRow);
       showMatchToolbar(resultsRow);
       if (typeof savedCount === "number") updateSavedNavCount(savedCount);
       clearThinkingStatus();
@@ -1845,7 +1979,8 @@
           await renderFinal(
             Array.isArray(event.matches) ? event.matches : [],
             event.location || {},
-            event.saved_count
+            event.saved_count,
+            event.screened_note || ""
           );
           return;
         }
@@ -1867,7 +2002,8 @@
         await renderFinal(
           Array.isArray(data.matches) ? data.matches : [],
           data.location || {},
-          data.saved_count
+          data.saved_count,
+          data.screened_note || ""
         );
       }
 
@@ -1900,7 +2036,7 @@
       removeNode(typing);
       appendText(
         "assistant",
-        "Thanks — your project profile is ready. I'll search Grants.gov, USASpending, and GrantedAI now."
+        "Thanks — your project profile is ready. I'll search Grants.gov and GrantedAI now, and only show opportunities you're eligible for."
       );
       await loadMatches();
     } catch (err) {

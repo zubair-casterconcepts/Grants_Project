@@ -17,8 +17,8 @@ from apps.accounts.chat_services import (
     upsert_project_for_conversation,
 )
 from apps.accounts.forms import ProfileAccountForm, ProfileIntakeForm, STATE_CHOICES
-from apps.accounts.models import Conversation, Profile, SavedGrant
-from apps.accounts.services import get_or_create_profile
+from apps.accounts.models import Conversation, GrantFeedback, Profile, SavedGrant
+from apps.accounts.services import feedback_signals, get_or_create_profile
 from services.grant_agent import iter_grant_matching_events, run_grant_matching_agent
 from services.location_utils import normalize_location
 from services.query_context import resolve_search_context
@@ -31,20 +31,28 @@ def _prepare_matches(user, matches):
         f"{row.source}:{row.external_id}"
         for row in SavedGrant.objects.filter(user=user).only("source", "external_id")
     }
+    # Existing verdicts so a card can render its current Eligible / Not-eligible state.
+    verdicts = {
+        f"{row.source}:{row.external_id}": row.verdict
+        for row in GrantFeedback.objects.filter(user=user).only(
+            "source", "external_id", "verdict"
+        )
+    }
     prepared = []
     for match in matches:
         row = dict(match)
-        key = (
-            f"{row.get('source', '')}:"
-            f"{row.get('id') or row.get('number') or row.get('url') or row.get('title', '')}"
-        )
-        row["is_saved"] = key in saved_keys
-        row["save_external_id"] = (
+        external_id = (
             row.get("id")
             or row.get("number")
             or row.get("url")
             or row.get("title", "")
         )
+        # Match how save_grant_view stores it, so long URLs/titles still line up.
+        external_id = str(external_id)[:255]
+        key = f"{row.get('source', '')}:{external_id}"
+        row["is_saved"] = key in saved_keys
+        row["save_external_id"] = external_id
+        row["user_feedback"] = verdicts.get(key, "")
         prepared.append(row)
     return prepared, len(saved_keys)
 
@@ -240,7 +248,11 @@ def matches_api_view(request):
 
     try:
         user_query = (request.GET.get("q") or "").strip()
-        matches = run_grant_matching_agent(profile, user_query=user_query)
+        matches = run_grant_matching_agent(
+            profile,
+            user_query=user_query,
+            feedback=feedback_signals(request.user),
+        )
         prepared, saved_count = _prepare_matches(request.user, matches)
         ctx = resolve_search_context(profile, user_query=user_query)
         return JsonResponse(
@@ -275,10 +287,15 @@ def matches_stream_api_view(request):
         return JsonResponse({"error": "onboarding_required"}, status=403)
 
     user_query = (request.GET.get("q") or "").strip()
+    # Read verdicts once, before streaming starts — the generator runs outside
+    # the request/response cycle and should not hold extra DB work open.
+    signals = feedback_signals(request.user)
 
     def event_stream():
         try:
-            for event in iter_grant_matching_events(profile, user_query=user_query):
+            for event in iter_grant_matching_events(
+                profile, user_query=user_query, feedback=signals
+            ):
                 payload = dict(event)
                 if "matches" in payload:
                     prepared, saved_count = _prepare_matches(
@@ -305,6 +322,59 @@ def matches_stream_api_view(request):
     response["Cache-Control"] = "no-cache, no-transform"
     response["X-Accel-Buffering"] = "no"
     return response
+
+
+@login_required
+@require_POST
+def grant_feedback_api(request):
+    """
+    Record a user's verdict on one opportunity (Eligible / Not eligible /
+    Irrelevant). The verdict suppresses that exact opportunity next time and
+    feeds funder/category patterns into future ranking.
+
+    Posting the same verdict again clears it, so a mis-click is undoable.
+    """
+    profile = get_or_create_profile(request.user)
+    if profile.needs_onboarding:
+        return JsonResponse({"ok": False, "error": "onboarding_required"}, status=403)
+
+    try:
+        payload = json.loads(request.body.decode("utf-8") or "{}")
+    except json.JSONDecodeError:
+        return JsonResponse({"ok": False, "error": "invalid_json"}, status=400)
+
+    source = str(payload.get("source") or "").strip()
+    external_id = str(payload.get("external_id") or "").strip()[:255]
+    verdict = str(payload.get("verdict") or "").strip()
+
+    if not source or not external_id:
+        return JsonResponse({"ok": False, "error": "missing_grant"}, status=400)
+    if verdict not in dict(GrantFeedback.Verdict.choices):
+        return JsonResponse({"ok": False, "error": "invalid_verdict"}, status=400)
+
+    existing = GrantFeedback.objects.filter(
+        user=request.user, source=source, external_id=external_id
+    ).first()
+
+    # Same verdict twice = undo.
+    if existing and existing.verdict == verdict:
+        existing.delete()
+        return JsonResponse({"ok": True, "verdict": "", "cleared": True})
+
+    GrantFeedback.objects.update_or_create(
+        user=request.user,
+        source=source,
+        external_id=external_id,
+        defaults={
+            "verdict": verdict,
+            "note": str(payload.get("note") or "")[:2000],
+            "title": str(payload.get("title") or "")[:500],
+            "agency": str(payload.get("agency") or "")[:255],
+            "category": str(payload.get("category") or "")[:120],
+            "pop_state": str(payload.get("pop_state") or "")[:32],
+        },
+    )
+    return JsonResponse({"ok": True, "verdict": verdict, "cleared": False})
 
 
 @login_required
@@ -501,6 +571,13 @@ def conversation_detail_api(request, conversation_id: int):
         message_to_dict(row)
         for row in conversation.messages.order_by("created_at", "id")
     ]
+    # Match cards are stored as they looked when the search ran. Refresh the
+    # user-specific state so a reopened chat shows current Saved / feedback marks
+    # instead of whatever was true at the time.
+    for message in messages:
+        meta = message.get("metadata") or {}
+        if isinstance(meta.get("matches"), list) and meta["matches"]:
+            meta["matches"], _ = _prepare_matches(request.user, meta["matches"])
     return JsonResponse(
         {
             "ok": True,

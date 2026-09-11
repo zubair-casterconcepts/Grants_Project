@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import html
 import logging
+import os
 import re
 from typing import Any
 
@@ -18,9 +19,12 @@ SEARCH2_URL = "https://api.grants.gov/v1/api/search2"
 FETCH_OPPORTUNITY_URL = "https://api.grants.gov/v1/api/fetchOpportunity"
 # Max concurrent detail lookups during enrichment.
 DETAIL_WORKERS = 8
-# Only enrich the first N hits so search can stream cards sooner.
-# Remaining rows still return with search2 fields (title, deadline, url, status).
-ENRICH_LIMIT = 10
+# Eligibility (applicantTypes) only exists on the detail endpoint, and the
+# eligibility gate must judge every row it is shown — an unenriched row has no
+# applicant types and would be waved through unverified. So enrich the whole
+# candidate pool by default. Lower GRANTS_GOV_ENRICH_LIMIT to trade strictness
+# for latency.
+ENRICH_LIMIT = max(1, int(os.getenv("GRANTS_GOV_ENRICH_LIMIT", "30")))
 DETAIL_TIMEOUT_SECONDS = 8
 CONNECT_TIMEOUT_SECONDS = 5
 REQUEST_TIMEOUT_SECONDS = 20

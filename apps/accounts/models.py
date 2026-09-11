@@ -191,6 +191,65 @@ class WeeklyDigestLog(models.Model):
         return f"{self.user.get_username()} {self.week_start} ({self.status})"
 
 
+class GrantFeedback(models.Model):
+    """
+    A user's verdict on one recommended opportunity.
+
+    Grant writers reported that most results turn out ineligible only after
+    they dig in. Capturing that verdict lets the next search suppress the exact
+    opportunity and down-rank the funders/categories they keep rejecting.
+
+    Signal fields (agency/category/state) are denormalized on purpose: the row
+    must stay useful for ranking even after the opportunity leaves the API.
+    """
+
+    class Verdict(models.TextChoices):
+        GOOD_MATCH = "good_match", "Eligible / good match"
+        NOT_ELIGIBLE = "not_eligible", "Not eligible"
+        IRRELEVANT = "irrelevant", "Irrelevant"
+
+    user = models.ForeignKey(
+        GrantUser,
+        on_delete=models.CASCADE,
+        related_name="grant_feedback",
+    )
+    source = models.CharField(max_length=32)
+    external_id = models.CharField(max_length=255, blank=True)
+    verdict = models.CharField(max_length=32, choices=Verdict.choices)
+    note = models.TextField(blank=True, help_text="Optional why-not from the user")
+
+    # Denormalized ranking signals.
+    title = models.CharField(max_length=500, blank=True)
+    agency = models.CharField(max_length=255, blank=True)
+    category = models.CharField(max_length=120, blank=True)
+    pop_state = models.CharField(max_length=32, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "grant_feedback"
+        ordering = ["-created_at"]
+        verbose_name = "Grant feedback"
+        verbose_name_plural = "Grant feedback"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["user", "source", "external_id"],
+                name="uniq_user_source_external_feedback",
+            )
+        ]
+        indexes = [
+            models.Index(fields=["user", "verdict"], name="idx_feedback_user_verdict"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.verdict}: {self.title[:50]}"
+
+    @property
+    def is_negative(self) -> bool:
+        return self.verdict in {self.Verdict.NOT_ELIGIBLE, self.Verdict.IRRELEVANT}
+
+
 class StarterPrompt(models.Model):
     """
     Customizable predefined chat starter cards ("Find grants", "Update my
