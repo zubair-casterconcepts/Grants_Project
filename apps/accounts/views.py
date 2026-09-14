@@ -285,7 +285,15 @@ def feedback_reasons_view(request):
     rows = GrantFeedback.objects.select_related("user").in_bulk(
         [entry["id"] for entry in page.object_list]
     )
-    items = [{**entry, "feedback": rows[entry["id"]]} for entry in page.object_list if entry["id"] in rows]
+    items = []
+    for entry in page.object_list:
+        row = rows.get(entry["id"])
+        if row is None:
+            continue
+        own = row.user_id == request.user.pk
+        # Owners edit and delete their feedback; staff can also delete anyone's
+        # (e.g. an abusive reason) but never rewrite someone else's words.
+        items.append({**entry, "feedback": row, "can_edit": own, "can_delete": own or is_staff})
 
     return render(
         request,
@@ -293,6 +301,13 @@ def feedback_reasons_view(request):
         {
             "profile": profile,
             "items": items,
+            "verdict_choices": [
+                (GrantFeedback.Verdict.GOOD_MATCH, "Good match"),
+                (GrantFeedback.Verdict.NOT_ELIGIBLE, "Not eligible"),
+                (GrantFeedback.Verdict.IRRELEVANT, "Not relevant"),
+            ],
+            "reason_min": GrantFeedback.REASON_MIN_CHARS,
+            "reason_max": GrantFeedback.REASON_MAX_CHARS,
             "page": page,
             "status": status,
             "status_label": labels[status],
@@ -313,6 +328,78 @@ def feedback_reasons_view(request):
             "saved_count": SavedGrant.objects.filter(user=request.user).count(),
         },
     )
+
+
+def _feedback_page_url(request) -> str:
+    """Back to the Feedback page, keeping its filters; never an outside URL."""
+    from django.urls import reverse
+    from django.utils.http import url_has_allowed_host_and_scheme
+
+    base = reverse("accounts:feedback_reasons")
+    target = (request.POST.get("next") or "").strip()
+    if (target == base or target.startswith(f"{base}?")) and url_has_allowed_host_and_scheme(
+        target, allowed_hosts={request.get_host()}, require_https=request.is_secure()
+    ):
+        return target
+    return base
+
+
+@login_required
+@require_POST
+def feedback_reason_update_view(request, feedback_id: int):
+    """
+    Edit your own reason and verdict. A real change moves `updated_at` forward,
+    which puts the reason back to Pending, so the next weekly instruction update
+    learns from the new wording.
+    """
+    from .models import GrantFeedback
+
+    back = _feedback_page_url(request)
+    feedback = get_object_or_404(GrantFeedback, pk=feedback_id, user=request.user)
+
+    note = (request.POST.get("note") or "").strip()[: GrantFeedback.REASON_MAX_CHARS]
+    verdict = (request.POST.get("verdict") or feedback.verdict).strip()
+    if verdict not in GrantFeedback.Verdict.values:
+        messages.error(request, "Choose Good match, Not eligible or Not relevant.")
+        return redirect(back)
+    if len(note) < GrantFeedback.REASON_MIN_CHARS:
+        messages.error(request, "Please add a short reason — a few words is enough.")
+        return redirect(back)
+    if note == (feedback.note or "").strip() and verdict == feedback.verdict:
+        # Nothing changed: keep its status (e.g. Converted) instead of resetting it.
+        messages.info(request, "No changes to save.")
+        return redirect(back)
+
+    feedback.note = note
+    feedback.verdict = verdict
+    feedback.save(update_fields=["note", "verdict", "updated_at"])
+    messages.success(
+        request, "Feedback updated. It's pending and will be used in the next weekly update."
+    )
+    return redirect(back)
+
+
+@login_required
+@require_POST
+def feedback_reason_delete_view(request, feedback_id: int):
+    """
+    Delete a reason and its verdict. Users delete their own; staff can also
+    remove anyone's (for example an abusive or misleading reason).
+    """
+    from .models import GrantFeedback
+
+    back = _feedback_page_url(request)
+    rows = GrantFeedback.objects.select_related("user")
+    if not request.user.is_staff:
+        rows = rows.filter(user=request.user)
+    feedback = get_object_or_404(rows, pk=feedback_id)
+    owner = feedback.user
+    feedback.delete()
+    if owner.pk == request.user.pk:
+        messages.success(request, "Feedback deleted.")
+    else:
+        messages.success(request, f"Deleted {owner.get_username()}'s feedback.")
+    return redirect(back)
 
 
 def _wants_json(request) -> bool:

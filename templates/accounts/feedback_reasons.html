@@ -9,7 +9,14 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=Manrope:wght@400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="{% static 'css/dashboard.css' %}">
-  <link rel="stylesheet" href="{% static 'css/feedback_reasons.css' %}">
+  <link rel="stylesheet" href="{% static 'css/feedback_reasons.css' %}?v=20260914-edit">
+  <noscript>
+    <style>
+      .fr-edit-toggle,
+      .fr-edit-cancel { display: none !important; }
+      .fr-edit[hidden] { display: grid !important; }
+    </style>
+  </noscript>
 </head>
 <body class="dashboard-page">
   <main class="dashboard-shell">
@@ -24,6 +31,14 @@
         {% include "partials/profile_menu.html" %}
       </div>
     </header>
+
+    {% if messages %}
+      <ul class="dash-messages">
+        {% for message in messages %}
+          <li class="{{ message.tags }}" role="status">{{ message }}</li>
+        {% endfor %}
+      </ul>
+    {% endif %}
 
     <section class="dash-hero">
       <p class="dash-breadcrumb">{{ request.user.get_username }} · Feedback</p>
@@ -108,7 +123,7 @@
     <section class="fr-list" aria-label="Feedback reasons">
       {% for item in items %}
         {% with fb=item.feedback %}
-          <article class="fr-card">
+          <article class="fr-card" id="feedback-{{ fb.pk }}">
             <header class="fr-card-head">
               <span class="fr-verdict fr-verdict-{{ fb.verdict }}">
                 {% if fb.verdict == "good_match" %}Good match{% elif fb.verdict == "not_eligible" %}Not eligible{% else %}Not relevant{% endif %}
@@ -122,15 +137,72 @@
             <p class="fr-grant">
               {{ fb.title|default:"Untitled opportunity" }}{% if fb.agency %} · {{ fb.agency }}{% endif %}{% if show_all %} · by {{ fb.user.get_username }}{% endif %}
             </p>
-            <p class="fr-detail">
-              {{ item.detail }}
-              {% if item.status == "converted" and item.update.is_active %}
-                <span class="fr-active">In the active instructions</span>
+            <div class="fr-foot">
+              <p class="fr-detail">
+                {{ item.detail }}
+                {% if item.status == "converted" and item.update.is_active %}
+                  <span class="fr-active">In the active instructions</span>
+                {% endif %}
+                {% if is_staff and item.update %}
+                  <a href="{% url 'admin:accounts_agentinstructionupdate_change' item.update.pk %}">View update</a>
+                {% endif %}
+              </p>
+              {% if item.can_edit or item.can_delete %}
+                <div class="fr-actions">
+                  {% if item.can_edit %}
+                    <button
+                      type="button"
+                      class="btn-view fr-edit-toggle"
+                      aria-expanded="false"
+                      aria-controls="fr-edit-{{ fb.pk }}"
+                    >Edit</button>
+                  {% endif %}
+                  {% if item.can_delete %}
+                    <form
+                      class="fr-delete-form"
+                      method="post"
+                      action="{% url 'accounts:feedback_reason_delete' fb.pk %}"
+                      data-no-loader="true"
+                      data-confirm="{% if item.can_edit %}Delete this feedback? The grant can appear in your searches again.{% else %}Delete {{ fb.user.get_username }}'s feedback? The grant can appear in their searches again.{% endif %} Instructions already learned from it stay until a later weekly update changes them."
+                    >
+                      {% csrf_token %}
+                      <input type="hidden" name="next" value="{{ request.get_full_path }}">
+                      <button type="submit" class="btn-view btn-unsave">Delete</button>
+                    </form>
+                  {% endif %}
+                </div>
               {% endif %}
-              {% if is_staff and item.update %}
-                <a href="{% url 'admin:accounts_agentinstructionupdate_change' item.update.pk %}">View update</a>
-              {% endif %}
-            </p>
+            </div>
+            {% if item.can_edit %}
+              <form
+                class="fr-edit"
+                id="fr-edit-{{ fb.pk }}"
+                method="post"
+                action="{% url 'accounts:feedback_reason_update' fb.pk %}"
+                data-loader-message="Saving feedback…"
+                hidden
+              >
+                {% csrf_token %}
+                <input type="hidden" name="next" value="{{ request.get_full_path }}">
+                <label class="fr-field">
+                  <span>Verdict</span>
+                  <select name="verdict">
+                    {% for value, label in verdict_choices %}
+                      <option value="{{ value }}"{% if value == fb.verdict %} selected{% endif %}>{{ label }}</option>
+                    {% endfor %}
+                  </select>
+                </label>
+                <label class="fr-field">
+                  <span>Reason</span>
+                  <textarea name="note" rows="3" required minlength="{{ reason_min }}" maxlength="{{ reason_max }}">{{ fb.note }}</textarea>
+                </label>
+                <p class="fr-edit-hint">Saving a change moves this reason back to Pending, so the next weekly update learns from it.</p>
+                <div class="fr-edit-actions">
+                  <button type="button" class="btn-view fr-edit-cancel">Cancel</button>
+                  <button type="submit" class="btn-save">Save</button>
+                </div>
+              </form>
+            {% endif %}
           </article>
         {% endwith %}
       {% empty %}
@@ -155,7 +227,19 @@
     {% endif %}
   </main>
 
+  <dialog class="fr-dialog" id="fr-delete-dialog" aria-labelledby="fr-delete-title" aria-describedby="fr-delete-copy">
+    <form method="dialog" class="fr-dialog-card" data-no-loader="true">
+      <h2 class="fr-dialog-title" id="fr-delete-title">Delete feedback?</h2>
+      <p class="fr-dialog-copy" id="fr-delete-copy"></p>
+      <div class="fr-edit-actions">
+        <button type="submit" value="cancel" class="btn-view">Cancel</button>
+        <button type="submit" value="delete" class="btn-view btn-unsave">Delete</button>
+      </div>
+    </form>
+  </dialog>
+
   {% include "partials/page_loader.html" %}
   <script src="{% static 'js/profile-menu.js' %}" defer></script>
+  <script src="{% static 'js/feedback_reasons.js' %}?v=20260914-edit" defer></script>
 </body>
 </html>
