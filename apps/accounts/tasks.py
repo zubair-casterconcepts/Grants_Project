@@ -54,17 +54,19 @@ def send_weekly_digests_task(force: bool = False) -> dict:
 @shared_task(name="accounts.update_agent_instructions")
 def update_agent_instructions_task(force: bool = False) -> dict:
     """
-    End-of-week job: distil the past week's Good match / Not eligible /
-    Not relevant reasons into rules appended to the agent instructions.
+    End-of-week job: check the past week's Good match / Not eligible /
+    Not relevant reasons against the agent's system prompt and patch it only
+    where they conflict.
     """
     from services.instruction_learning import update_agent_instructions
 
     report = update_agent_instructions(force=force)
     summary = {
         key: report.get(key)
-        for key in ("status", "method", "feedback_count", "update_id", "detail")
+        for key in ("status", "method", "feedback_count", "update_id", "prompt_version", "detail")
         if key in report
     }
-    summary["rules"] = len(report.get("rules") or [])
+    summary["conflicts"] = len(report.get("conflicts") or [])
+    summary["changes"] = len(report.get("summary") or [])
     logger.info("Agent instruction update finished %s", summary)
     return summary

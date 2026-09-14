@@ -1,8 +1,10 @@
+from django import forms
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin as DjangoUserAdmin
 
 from .models import (
     AgentInstructionUpdate,
+    AgentSystemPrompt,
     Conversation,
     GrantFeedback,
     GrantUser,
@@ -130,62 +132,104 @@ class GrantFeedbackAdmin(admin.ModelAdmin):
         return (obj.note or "")[:80]
 
 
-@admin.register(AgentInstructionUpdate)
-class AgentInstructionUpdateAdmin(admin.ModelAdmin):
-    """Weekly learned rules. Only one update is active; edits apply within minutes."""
+class AgentSystemPromptForm(forms.ModelForm):
+    class Meta:
+        model = AgentSystemPrompt
+        fields = "__all__"
 
-    list_display = ("created_at", "period_end", "feedback_count", "status", "method", "is_active")
-    list_filter = ("status", "method", "is_active")
-    fields = (
-        "is_active",
-        "guidance",
-        "status",
-        "method",
-        "feedback_count",
-        "period_start",
-        "period_end",
-        "detail",
-        "created_at",
-    )
-    readonly_fields = (
-        "status",
-        "method",
-        "feedback_count",
-        "period_start",
-        "period_end",
-        "detail",
-        "created_at",
-    )
-    actions = ("activate_update", "deactivate_updates")
+    def _get_validation_exclusions(self):
+        excluded = super()._get_validation_exclusions()
+        # "One active version" is kept by save_model, which switches the current
+        # one off first; validating it here would reject every activation.
+        excluded.add("is_active")
+        return excluded
+
+
+@admin.register(AgentSystemPrompt)
+class AgentSystemPromptAdmin(admin.ModelAdmin):
+    """
+    The agent's full system prompt, versioned. Exactly one version is active.
+    Saving a change or adding a version takes effect within minutes; use the
+    action to roll back to an older version.
+    """
+
+    form = AgentSystemPromptForm
+    list_display = ("version", "source", "is_active", "created_at", "short_summary")
+    list_filter = ("source", "is_active")
+    ordering = ("-version",)
+    fields = ("version", "is_active", "source", "based_on", "change_summary", "content", "created_at")
+    readonly_fields = ("version", "source", "based_on", "created_at")
+    actions = ("activate_version",)
+
+    @admin.display(description="Changes")
+    def short_summary(self, obj: AgentSystemPrompt) -> str:
+        return " ".join((obj.change_summary or "").split())[:90]
+
+    def formfield_for_dbfield(self, db_field, request, **kwargs):
+        field = super().formfield_for_dbfield(db_field, request, **kwargs)
+        if db_field.name == "content" and field is not None:
+            field.widget.attrs.update(rows=40, style="width: 100%; font-family: monospace;")
+        return field
 
     def save_model(self, request, obj, form, change):
-        from services.instruction_learning import clear_guidance_cache
+        from django.db import transaction
+        from django.db.models import Max
 
-        if obj.is_active:
-            AgentInstructionUpdate.objects.exclude(pk=obj.pk).update(is_active=False)
-        super().save_model(request, obj, form, change)
+        from services.instruction_learning import (
+            activate_prompt,
+            clear_guidance_cache,
+            normalize_prompt,
+        )
+
+        obj.content = normalize_prompt(obj.content)
+        with transaction.atomic():
+            if not obj.pk:
+                top = AgentSystemPrompt.objects.aggregate(top=Max("version"))["top"] or 0
+                obj.version = top + 1
+                obj.source = AgentSystemPrompt.Source.MANUAL
+                obj.based_on = AgentSystemPrompt.objects.filter(is_active=True).first()
+            wants_active = obj.is_active
+            obj.is_active = False  # only one active version: switch the others off first
+            super().save_model(request, obj, form, change)
+            if wants_active:
+                activate_prompt(obj)
         clear_guidance_cache()
 
-    @admin.action(description="Activate the selected update (deactivates the others)")
-    def activate_update(self, request, queryset):
-        from services.instruction_learning import clear_guidance_cache
+    @admin.action(description="Make the selected version the active prompt")
+    def activate_version(self, request, queryset):
+        from services.instruction_learning import activate_prompt
 
-        chosen = queryset.filter(status=AgentInstructionUpdate.Status.APPLIED).order_by("-created_at").first()
-        if chosen is None:
-            self.message_user(request, "Pick an applied update to activate.", level="warning")
+        if queryset.count() != 1:
+            self.message_user(request, "Select exactly one version to activate.", level="warning")
             return
-        AgentInstructionUpdate.objects.exclude(pk=chosen.pk).update(is_active=False)
-        AgentInstructionUpdate.objects.filter(pk=chosen.pk).update(is_active=True)
-        clear_guidance_cache()
-        self.message_user(request, f"Activated the update from {chosen.period_end:%Y-%m-%d}.")
+        chosen = queryset.first()
+        activate_prompt(chosen)
+        self.message_user(request, f"Version {chosen.version} is now the active prompt.")
 
-    @admin.action(description="Deactivate the selected updates")
-    def deactivate_updates(self, request, queryset):
-        from services.instruction_learning import clear_guidance_cache
 
-        count = queryset.update(is_active=False)
-        clear_guidance_cache()
-        self.message_user(request, f"Deactivated {count} update(s).")
+@admin.register(AgentInstructionUpdate)
+class AgentInstructionUpdateAdmin(admin.ModelAdmin):
+    """Read-only log of weekly runs. The prompt itself is under Agent system prompts."""
+
+    list_display = ("created_at", "period_end", "feedback_count", "status", "method", "prompt", "is_active")
+    list_filter = ("status", "method", "is_active")
+    fields = (
+        "status",
+        "method",
+        "prompt",
+        "is_active",
+        "feedback_count",
+        "period_start",
+        "period_end",
+        "guidance",
+        "detail",
+        "conflict_feedback_ids",
+        "created_at",
+    )
+    readonly_fields = fields
+
+    def has_add_permission(self, request):
+        return False
 
 
 @admin.register(StarterPrompt)

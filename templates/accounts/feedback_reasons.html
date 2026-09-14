@@ -88,8 +88,8 @@
     {% if active_update %}
       <details class="fr-rules">
         <summary>
-          Current learned instructions ({{ active_update.rules|length }})
-          <span>· from {{ active_update.period_end|date:"M j, Y" }}</span>
+          Latest instruction changes ({{ active_update.rules|length }})
+          <span>{% if active_update.prompt %}· version {{ active_update.prompt.version }} {% endif %}· {{ active_update.period_end|date:"M j, Y" }}</span>
         </summary>
         <ol>
           {% for rule in active_update.rules %}

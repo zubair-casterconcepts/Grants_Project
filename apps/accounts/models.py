@@ -254,13 +254,63 @@ class GrantFeedback(models.Model):
         return self.verdict in {self.Verdict.NOT_ELIGIBLE, self.Verdict.IRRELEVANT}
 
 
+class AgentSystemPrompt(models.Model):
+    """
+    One version of the agent's full system prompt.
+
+    Exactly one version is active; `services.grant_agent.load_agent_instructions()`
+    gives it to the agent. Version 1 is grant_agent_instructions.md as it was. The
+    weekly job adds a version only where feedback conflicts with the active one,
+    patching just those sentences (services/instruction_learning.py). Versions are
+    kept, so any change can be reviewed, edited or rolled back in admin.
+    """
+
+    class Source(models.TextChoices):
+        FILE = "file", "Imported from grant_agent_instructions.md"
+        WEEKLY = "weekly", "Weekly feedback patch"
+        MANUAL = "manual", "Edited in admin"
+
+    version = models.PositiveIntegerField(unique=True)
+    content = models.TextField(help_text="The full system prompt, in Markdown.")
+    source = models.CharField(max_length=16, choices=Source.choices, default=Source.MANUAL)
+    based_on = models.ForeignKey(
+        "self",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+    )
+    change_summary = models.TextField(
+        blank=True, help_text="What changed from the version it is based on."
+    )
+    is_active = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "grant_agent_system_prompt"
+        ordering = ["-version"]
+        verbose_name = "Agent system prompt"
+        verbose_name_plural = "Agent system prompts"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["is_active"],
+                condition=models.Q(is_active=True),
+                name="uniq_active_agent_system_prompt",
+            )
+        ]
+
+    def __str__(self) -> str:
+        return f"v{self.version}{' (active)' if self.is_active else ''}"
+
+
 class AgentInstructionUpdate(models.Model):
     """
-    One weekly run that turned feedback reasons into agent guidance.
+    Log of one weekly run that checked feedback reasons against the agent's
+    system prompt.
 
-    The active, applied row's rules are appended to the hand-written agent
-    instructions (see services/instruction_learning.py). Every run is kept, so an
-    update can be reviewed, edited, or switched off from admin.
+    Applied runs patched the prompt and point at the version they created;
+    skipped runs say why nothing changed. The Feedback page reads these rows to
+    show which reasons were converted into instructions.
     """
 
     class Status(models.TextChoices):
@@ -268,8 +318,8 @@ class AgentInstructionUpdate(models.Model):
         SKIPPED = "skipped", "Skipped"
 
     class Method(models.TextChoices):
-        AI = "ai", "AI summary of reasons"
-        SUMMARY = "summary", "Pattern summary (AI unavailable)"
+        AI = "ai", "AI"
+        SUMMARY = "summary", "Pattern summary (older runs)"
 
     period_start = models.DateTimeField()
     period_end = models.DateTimeField()
@@ -278,9 +328,22 @@ class AgentInstructionUpdate(models.Model):
     method = models.CharField(max_length=16, choices=Method.choices, blank=True)
     guidance = models.TextField(
         blank=True,
-        help_text="Rules appended to the agent instructions, one '- ' bullet per line.",
+        help_text="What this run changed, one '- ' line per change.",
     )
     detail = models.TextField(blank=True)
+    prompt = models.ForeignKey(
+        AgentSystemPrompt,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="updates",
+        help_text="The prompt version this run created.",
+    )
+    conflict_feedback_ids = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="Feedback rows whose reasons caused this run's changes.",
+    )
     is_active = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
 
