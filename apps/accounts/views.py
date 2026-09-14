@@ -233,6 +233,88 @@ def saved_grants_view(request):
     )
 
 
+@login_required
+@require_http_methods(["GET"])
+def feedback_reasons_view(request):
+    """
+    Feedback reasons and whether each has become agent instructions yet.
+    Staff see everyone's reasons; other users see only their own.
+    """
+    from urllib.parse import urlencode
+
+    from django.core.paginator import Paginator
+
+    from services.instruction_learning import (
+        REASON_CONVERTED,
+        REASON_NOT_CONVERTED,
+        REASON_PENDING,
+        feedback_learning_report,
+    )
+
+    from .models import GrantFeedback
+
+    profile = get_or_create_profile(request.user)
+    if profile.needs_onboarding:
+        return redirect("auth:home")
+
+    is_staff = request.user.is_staff
+    show_all = is_staff and request.GET.get("scope") != "mine"
+    labels = {
+        "all": "All",
+        REASON_PENDING: "Pending",
+        REASON_CONVERTED: "Converted",
+        REASON_NOT_CONVERTED: "Not converted",
+    }
+    status = request.GET.get("status") or "all"
+    if status not in labels:
+        status = "all"
+
+    def link(status_key=status, all_users=show_all, page_number=None):
+        params = {}
+        if status_key != "all":
+            params["status"] = status_key
+        if is_staff and not all_users:
+            params["scope"] = "mine"
+        if page_number:
+            params["page"] = page_number
+        return f"?{urlencode(params)}" if params else request.path
+
+    report = feedback_learning_report(user=None if show_all else request.user)
+    entries = [e for e in report["entries"] if status == "all" or e["status"] == status]
+    page = Paginator(entries, 25).get_page(request.GET.get("page"))
+    rows = GrantFeedback.objects.select_related("user").in_bulk(
+        [entry["id"] for entry in page.object_list]
+    )
+    items = [{**entry, "feedback": rows[entry["id"]]} for entry in page.object_list if entry["id"] in rows]
+
+    return render(
+        request,
+        "accounts/feedback_reasons.html",
+        {
+            "profile": profile,
+            "items": items,
+            "page": page,
+            "status": status,
+            "status_label": labels[status],
+            "counts": report["counts"],
+            "tabs": [
+                {"key": key, "label": label, "count": report["counts"][key], "url": link(status_key=key)}
+                for key, label in labels.items()
+            ],
+            "active_update": report["active_update"],
+            "last_run": report["last_run"],
+            "next_update": report["next_update"],
+            "is_staff": is_staff,
+            "show_all": show_all,
+            "scope_all_url": link(all_users=True),
+            "scope_mine_url": link(all_users=False),
+            "prev_url": link(page_number=page.previous_page_number()) if page.has_previous() else "",
+            "next_url": link(page_number=page.next_page_number()) if page.has_next() else "",
+            "saved_count": SavedGrant.objects.filter(user=request.user).count(),
+        },
+    )
+
+
 def _wants_json(request) -> bool:
     accept = (request.headers.get("Accept") or "").lower()
     return (

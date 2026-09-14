@@ -1,0 +1,161 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Grants — Feedback</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=Manrope:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="{% static 'css/dashboard.css' %}">
+  <link rel="stylesheet" href="{% static 'css/feedback_reasons.css' %}">
+</head>
+<body class="dashboard-page">
+  <main class="dashboard-shell">
+    <header class="dash-topbar">
+      <a class="dash-brand" href="{% url 'auth:home' %}" data-loader-message="Opening chat…">Grants</a>
+      <div class="dash-top-actions">
+        <a class="dash-nav-btn" href="{% url 'auth:home' %}" data-loader-message="Opening chat…">Chat</a>
+        <a class="dash-nav-btn" href="{% url 'accounts:saved_grants' %}" data-loader-message="Opening saved grants…">
+          Saved{% if saved_count %} ({{ saved_count }}){% endif %}
+        </a>
+        <a class="dash-nav-btn" href="{% url 'accounts:settings' %}" data-loader-message="Opening settings…">Configuration</a>
+        {% include "partials/profile_menu.html" %}
+      </div>
+    </header>
+
+    <section class="dash-hero">
+      <p class="dash-breadcrumb">{{ request.user.get_username }} · Feedback</p>
+      <h1>Feedback reasons</h1>
+      <p class="dash-subtitle">
+        Reasons given for Good match, Not eligible and Not relevant — and whether each one has been
+        turned into instructions for the AI yet.
+      </p>
+    </section>
+
+    <section class="fr-summary" aria-label="Summary">
+      <div class="fr-tile fr-tile-pending">
+        <span class="fr-tile-label">Pending</span>
+        <strong class="fr-tile-count">{{ counts.pending }}</strong>
+        <span class="fr-tile-note">
+          {% if next_update %}
+            Next weekly update {{ next_update|date:"D, M j · H:i" }} UTC
+          {% else %}
+            Picked up by the next weekly update
+          {% endif %}
+        </span>
+      </div>
+      <div class="fr-tile fr-tile-converted">
+        <span class="fr-tile-label">Converted</span>
+        <strong class="fr-tile-count">{{ counts.converted }}</strong>
+        <span class="fr-tile-note">
+          {% if active_update %}
+            Active instructions from {{ active_update.period_end|date:"M j, Y" }}
+          {% else %}
+            No instructions learned yet
+          {% endif %}
+        </span>
+      </div>
+      <div class="fr-tile fr-tile-not_converted">
+        <span class="fr-tile-label">Not converted</span>
+        <strong class="fr-tile-count">{{ counts.not_converted }}</strong>
+        <span class="fr-tile-note">
+          {% if last_run %}
+            Last weekly run {{ last_run.created_at|date:"M j, Y" }}
+          {% else %}
+            The weekly update hasn't run yet
+          {% endif %}
+        </span>
+      </div>
+    </section>
+
+    {% if active_update %}
+      <details class="fr-rules">
+        <summary>
+          Current learned instructions ({{ active_update.rules|length }})
+          <span>· from {{ active_update.period_end|date:"M j, Y" }}</span>
+        </summary>
+        <ol>
+          {% for rule in active_update.rules %}
+            <li>{{ rule }}</li>
+          {% endfor %}
+        </ol>
+      </details>
+    {% endif %}
+
+    <div class="fr-toolbar">
+      <nav class="fr-filters" aria-label="Filter by status">
+        {% for tab in tabs %}
+          <a
+            class="fr-chip{% if tab.key == status %} is-active{% endif %}"
+            href="{{ tab.url }}"
+            {% if tab.key == status %}aria-current="page"{% endif %}
+            data-loader-message="Loading feedback…"
+          >
+            {{ tab.label }} <span class="fr-chip-count">{{ tab.count }}</span>
+          </a>
+        {% endfor %}
+      </nav>
+      {% if is_staff %}
+        <nav class="fr-scope" aria-label="Whose feedback">
+          <a class="fr-chip{% if show_all %} is-active{% endif %}" href="{{ scope_all_url }}" data-loader-message="Loading feedback…">All users</a>
+          <a class="fr-chip{% if not show_all %} is-active{% endif %}" href="{{ scope_mine_url }}" data-loader-message="Loading feedback…">Only mine</a>
+        </nav>
+      {% endif %}
+    </div>
+
+    <section class="fr-list" aria-label="Feedback reasons">
+      {% for item in items %}
+        {% with fb=item.feedback %}
+          <article class="fr-card">
+            <header class="fr-card-head">
+              <span class="fr-verdict fr-verdict-{{ fb.verdict }}">
+                {% if fb.verdict == "good_match" %}Good match{% elif fb.verdict == "not_eligible" %}Not eligible{% else %}Not relevant{% endif %}
+              </span>
+              <span class="fr-status fr-status-{{ item.status }}">
+                {% if item.status == "converted" %}Converted{% elif item.status == "pending" %}Pending{% else %}Not converted{% endif %}
+              </span>
+              <time class="fr-date" datetime="{{ fb.updated_at|date:'c' }}">{{ fb.updated_at|date:"M j, Y · H:i" }}</time>
+            </header>
+            <p class="fr-reason">{{ fb.note }}</p>
+            <p class="fr-grant">
+              {{ fb.title|default:"Untitled opportunity" }}{% if fb.agency %} · {{ fb.agency }}{% endif %}{% if show_all %} · by {{ fb.user.get_username }}{% endif %}
+            </p>
+            <p class="fr-detail">
+              {{ item.detail }}
+              {% if item.status == "converted" and item.update.is_active %}
+                <span class="fr-active">In the active instructions</span>
+              {% endif %}
+              {% if is_staff and item.update %}
+                <a href="{% url 'admin:accounts_agentinstructionupdate_change' item.update.pk %}">View update</a>
+              {% endif %}
+            </p>
+          </article>
+        {% endwith %}
+      {% empty %}
+        <p class="dashboard-empty">
+          {% if status == "all" %}
+            No feedback reasons yet. In
+            <a href="{% url 'auth:home' %}">chat</a>,
+            click Good match, Not eligible or Not relevant on a result and say why.
+          {% else %}
+            No {{ status_label|lower }} reasons.
+          {% endif %}
+        </p>
+      {% endfor %}
+    </section>
+
+    {% if page.has_other_pages %}
+      <nav class="fr-pages" aria-label="Pages">
+        {% if prev_url %}<a class="fr-chip" href="{{ prev_url }}" data-loader-message="Loading feedback…">Previous</a>{% endif %}
+        <span>Page {{ page.number }} of {{ page.paginator.num_pages }}</span>
+        {% if next_url %}<a class="fr-chip" href="{{ next_url }}" data-loader-message="Loading feedback…">Next</a>{% endif %}
+      </nav>
+    {% endif %}
+  </main>
+
+  {% include "partials/page_loader.html" %}
+  <script src="{% static 'js/profile-menu.js' %}" defer></script>
+</body>
+</html>

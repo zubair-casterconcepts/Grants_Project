@@ -328,11 +328,18 @@ def matches_stream_api_view(request):
 @require_POST
 def grant_feedback_api(request):
     """
-    Record a user's verdict on one opportunity (Eligible / Not eligible /
-    Irrelevant). The verdict suppresses that exact opportunity next time and
-    feeds funder/category patterns into future ranking.
+    Record a user's verdict on one opportunity (Good match / Not eligible /
+    Not relevant) and the reason they gave.
 
-    Posting the same verdict again clears it, so a mis-click is undoable.
+    The verdict suppresses or down-ranks similar opportunities in later
+    searches; the reason feeds the weekly agent-instruction update
+    (services/instruction_learning.py).
+
+    `mode`:
+    - "set":   save this verdict with a reason (the reason is required).
+    - "clear": remove this user's verdict for the opportunity.
+    - omitted: legacy toggle for pages still running an older cached chat.js —
+               the same verdict posted twice clears it.
     """
     profile = get_or_create_profile(request.user)
     if profile.needs_onboarding:
@@ -345,34 +352,49 @@ def grant_feedback_api(request):
 
     source = str(payload.get("source") or "").strip()
     external_id = str(payload.get("external_id") or "").strip()[:255]
-    verdict = str(payload.get("verdict") or "").strip()
+    mode = str(payload.get("mode") or "").strip().lower()
 
     if not source or not external_id:
         return JsonResponse({"ok": False, "error": "missing_grant"}, status=400)
-    if verdict not in dict(GrantFeedback.Verdict.choices):
-        return JsonResponse({"ok": False, "error": "invalid_verdict"}, status=400)
+    if mode not in {"", "set", "clear"}:
+        return JsonResponse({"ok": False, "error": "invalid_mode"}, status=400)
 
     existing = GrantFeedback.objects.filter(
         user=request.user, source=source, external_id=external_id
     ).first()
 
-    # Same verdict twice = undo.
-    if existing and existing.verdict == verdict:
+    if mode == "clear":
+        if existing:
+            existing.delete()
+        return JsonResponse({"ok": True, "verdict": "", "cleared": True})
+
+    verdict = str(payload.get("verdict") or "").strip()
+    if verdict not in dict(GrantFeedback.Verdict.choices):
+        return JsonResponse({"ok": False, "error": "invalid_verdict"}, status=400)
+
+    note = str(payload.get("note") or "").strip()[: GrantFeedback.REASON_MAX_CHARS]
+    if mode == "set":
+        if len(note) < GrantFeedback.REASON_MIN_CHARS:
+            return JsonResponse({"ok": False, "error": "reason_required"}, status=400)
+    elif existing and existing.verdict == verdict:
         existing.delete()
         return JsonResponse({"ok": True, "verdict": "", "cleared": True})
 
+    defaults = {
+        "verdict": verdict,
+        "title": str(payload.get("title") or "")[:500],
+        "agency": str(payload.get("agency") or "")[:255],
+        "category": str(payload.get("category") or "")[:120],
+        "pop_state": str(payload.get("pop_state") or "")[:32],
+    }
+    # Legacy posts carry no reason; don't wipe one the user saved earlier.
+    if note or not existing:
+        defaults["note"] = note
     GrantFeedback.objects.update_or_create(
         user=request.user,
         source=source,
         external_id=external_id,
-        defaults={
-            "verdict": verdict,
-            "note": str(payload.get("note") or "")[:2000],
-            "title": str(payload.get("title") or "")[:500],
-            "agency": str(payload.get("agency") or "")[:255],
-            "category": str(payload.get("category") or "")[:120],
-            "pop_state": str(payload.get("pop_state") or "")[:32],
-        },
+        defaults=defaults,
     )
     return JsonResponse({"ok": True, "verdict": verdict, "cleared": False})
 

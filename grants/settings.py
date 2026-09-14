@@ -188,6 +188,10 @@ except ImportError:  # Celery not installed in this environment
 else:
     _digest_hour = int(os.getenv("WEEKLY_DIGEST_HOUR_UTC", "9"))
     _digest_minute = int(os.getenv("WEEKLY_DIGEST_MINUTE_UTC", "0"))
+    # End of week (default Sunday 23:00 UTC): learn agent rules from feedback reasons.
+    _instructions_day = os.getenv("INSTRUCTION_UPDATE_DAY_OF_WEEK", "0")  # 0 = Sunday
+    _instructions_hour = int(os.getenv("INSTRUCTION_UPDATE_HOUR_UTC", "23"))
+    _instructions_minute = int(os.getenv("INSTRUCTION_UPDATE_MINUTE_UTC", "0"))
     CELERY_BEAT_SCHEDULE = {
         "weekly-grant-digest-monday": {
             "task": "accounts.send_weekly_digests",
@@ -195,6 +199,14 @@ else:
                 minute=_digest_minute,
                 hour=_digest_hour,
                 day_of_week=1,  # Monday
+            ),
+        },
+        "weekly-agent-instruction-update": {
+            "task": "accounts.update_agent_instructions",
+            "schedule": crontab(
+                minute=_instructions_minute,
+                hour=_instructions_hour,
+                day_of_week=_instructions_day,
             ),
         },
     }

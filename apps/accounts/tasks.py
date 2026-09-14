@@ -49,3 +49,22 @@ def send_weekly_digests_task(force: bool = False) -> dict:
     }
     logger.info("Weekly digest Celery task finished %s", summary)
     return summary
+
+
+@shared_task(name="accounts.update_agent_instructions")
+def update_agent_instructions_task(force: bool = False) -> dict:
+    """
+    End-of-week job: distil the past week's Good match / Not eligible /
+    Not relevant reasons into rules appended to the agent instructions.
+    """
+    from services.instruction_learning import update_agent_instructions
+
+    report = update_agent_instructions(force=force)
+    summary = {
+        key: report.get(key)
+        for key in ("status", "method", "feedback_count", "update_id", "detail")
+        if key in report
+    }
+    summary["rules"] = len(report.get("rules") or [])
+    logger.info("Agent instruction update finished %s", summary)
+    return summary

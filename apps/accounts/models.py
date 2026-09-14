@@ -216,7 +216,11 @@ class GrantFeedback(models.Model):
     source = models.CharField(max_length=32)
     external_id = models.CharField(max_length=255, blank=True)
     verdict = models.CharField(max_length=32, choices=Verdict.choices)
-    note = models.TextField(blank=True, help_text="Optional why-not from the user")
+    # The chat asks for a reason with every verdict; the weekly instruction
+    # update (services/instruction_learning.py) learns from these.
+    REASON_MIN_CHARS = 3
+    REASON_MAX_CHARS = 1000
+    note = models.TextField(blank=True, help_text="The reason the user gave for this verdict")
 
     # Denormalized ranking signals.
     title = models.CharField(max_length=500, blank=True)
@@ -248,6 +252,53 @@ class GrantFeedback(models.Model):
     @property
     def is_negative(self) -> bool:
         return self.verdict in {self.Verdict.NOT_ELIGIBLE, self.Verdict.IRRELEVANT}
+
+
+class AgentInstructionUpdate(models.Model):
+    """
+    One weekly run that turned feedback reasons into agent guidance.
+
+    The active, applied row's rules are appended to the hand-written agent
+    instructions (see services/instruction_learning.py). Every run is kept, so an
+    update can be reviewed, edited, or switched off from admin.
+    """
+
+    class Status(models.TextChoices):
+        APPLIED = "applied", "Applied"
+        SKIPPED = "skipped", "Skipped"
+
+    class Method(models.TextChoices):
+        AI = "ai", "AI summary of reasons"
+        SUMMARY = "summary", "Pattern summary (AI unavailable)"
+
+    period_start = models.DateTimeField()
+    period_end = models.DateTimeField()
+    feedback_count = models.PositiveIntegerField(default=0)
+    status = models.CharField(max_length=16, choices=Status.choices)
+    method = models.CharField(max_length=16, choices=Method.choices, blank=True)
+    guidance = models.TextField(
+        blank=True,
+        help_text="Rules appended to the agent instructions, one '- ' bullet per line.",
+    )
+    detail = models.TextField(blank=True)
+    is_active = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "grant_agent_instruction_update"
+        ordering = ["-created_at"]
+        verbose_name = "Agent instruction update"
+        verbose_name_plural = "Agent instruction updates"
+
+    def __str__(self) -> str:
+        return f"{self.get_status_display()} {self.period_end:%Y-%m-%d}"
+
+    def rules(self) -> list[str]:
+        return [
+            line[2:].strip()
+            for line in (self.guidance or "").splitlines()
+            if line.startswith("- ") and line[2:].strip()
+        ]
 
 
 class StarterPrompt(models.Model):

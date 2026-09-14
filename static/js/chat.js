@@ -1475,6 +1475,171 @@
   }
 
   // Delegated so cards added later (streaming, reorder) stay wired up.
+  // Reason popup for Good match / Not eligible / Not relevant. The weekly
+  // agent-instruction update learns from these reasons, so a verdict is only
+  // saved together with one.
+  const FEEDBACK_PROMPTS = {
+    good_match: {
+      title: "What makes this a good match?",
+      placeholder: "e.g. We're a Michigan nonprofit and this funds after-school literacy programs.",
+    },
+    not_eligible: {
+      title: "Why aren't you eligible?",
+      placeholder: "e.g. Only school districts can apply, and we're a community foundation.",
+    },
+    irrelevant: {
+      title: "Why isn't this relevant?",
+      placeholder: "e.g. It funds research, not direct services for families.",
+    },
+  };
+  const FEEDBACK_REASON_MIN = 3;
+  const feedbackModal = document.getElementById("chat-feedback-modal");
+  const feedbackForm = document.getElementById("chat-feedback-form");
+  const feedbackTitleEl = document.getElementById("chat-feedback-title");
+  const feedbackGrantEl = document.getElementById("chat-feedback-grant");
+  const feedbackReasonEl = document.getElementById("chat-feedback-reason");
+  const feedbackErrorEl = document.getElementById("chat-feedback-error");
+  const feedbackSaveBtn = document.getElementById("chat-feedback-save");
+  let feedbackSession = null;
+
+  function setFeedbackError(message) {
+    if (!feedbackErrorEl) return;
+    feedbackErrorEl.textContent = message || "";
+    feedbackErrorEl.hidden = !message;
+  }
+
+  function setFeedbackSaving(saving) {
+    if (!feedbackSaveBtn) return;
+    feedbackSaveBtn.disabled = saving;
+    feedbackSaveBtn.textContent = saving ? "Saving…" : "Save";
+  }
+
+  function closeFeedbackModal() {
+    if (!feedbackModal || feedbackModal.hidden) return;
+    feedbackModal.hidden = true;
+    document.body.classList.remove("chat-modal-open");
+    const session = feedbackSession;
+    feedbackSession = null;
+    if (session && session.returnFocus && typeof session.returnFocus.focus === "function") {
+      session.returnFocus.focus();
+    }
+    if (session) session.done();
+  }
+
+  // Resolves when the popup closes. `save(reason)` runs on Save; if it throws,
+  // the popup stays open with an error so the typed reason isn't lost.
+  function askFeedbackReason({ verdict, grantTitle, save }) {
+    return new Promise((resolve) => {
+      if (!feedbackModal || !feedbackForm || !feedbackReasonEl) {
+        resolve();
+        return;
+      }
+      if (feedbackSession) closeFeedbackModal();
+      const prompt = FEEDBACK_PROMPTS[verdict] || FEEDBACK_PROMPTS.good_match;
+      feedbackSession = {
+        save,
+        done: resolve,
+        returnFocus: document.activeElement,
+        saving: false,
+      };
+      if (feedbackTitleEl) feedbackTitleEl.textContent = prompt.title;
+      if (feedbackGrantEl) feedbackGrantEl.textContent = grantTitle || "This opportunity";
+      feedbackReasonEl.value = "";
+      feedbackReasonEl.placeholder = prompt.placeholder;
+      setFeedbackError("");
+      setFeedbackSaving(false);
+      feedbackModal.hidden = false;
+      document.body.classList.add("chat-modal-open");
+      feedbackReasonEl.focus();
+    });
+  }
+
+  function dismissFeedbackModal() {
+    if (feedbackSession && feedbackSession.saving) return;
+    closeFeedbackModal();
+  }
+
+  if (feedbackForm) {
+    feedbackForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const session = feedbackSession;
+      if (!session || session.saving) return;
+      const reason = feedbackReasonEl.value.trim();
+      if (reason.length < FEEDBACK_REASON_MIN) {
+        setFeedbackError("Please add a short reason — a few words is enough.");
+        feedbackReasonEl.focus();
+        return;
+      }
+      session.saving = true;
+      setFeedbackError("");
+      setFeedbackSaving(true);
+      try {
+        await session.save(reason);
+        session.saving = false;
+        if (feedbackSession === session) closeFeedbackModal();
+      } catch (_) {
+        session.saving = false;
+        if (feedbackSession === session) {
+          setFeedbackSaving(false);
+          setFeedbackError("Couldn't save your feedback. Please try again.");
+        }
+      }
+    });
+  }
+  ["chat-feedback-cancel", "chat-feedback-backdrop"].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener("click", dismissFeedbackModal);
+  });
+  document.addEventListener("keydown", (event) => {
+    if (!feedbackModal || feedbackModal.hidden) return;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      dismissFeedbackModal();
+    } else if (event.key === "Enter" && (event.ctrlKey || event.metaKey) && feedbackForm) {
+      event.preventDefault();
+      feedbackForm.requestSubmit();
+    }
+  });
+
+  async function sendFeedback(grant, fields) {
+    const response = await fetch(feedbackUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        "X-CSRFToken": csrfToken,
+        "X-Requested-With": "XMLHttpRequest",
+      },
+      credentials: "same-origin",
+      body: JSON.stringify({
+        source: grant.source,
+        external_id: grant.externalId,
+        title: grant.title || "",
+        agency: grant.agency || "",
+        category: grant.category || "",
+        pop_state: grant.popState || "",
+        ...fields,
+      }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data.ok) throw new Error(data.error || "feedback_failed");
+    return data;
+  }
+
+  function showFeedbackState(card, group, applied) {
+    group.querySelectorAll(".feedback-btn").forEach((btn) => {
+      const on = btn.dataset.verdict === applied;
+      btn.classList.toggle("is-active", on);
+      btn.setAttribute("aria-pressed", on ? "true" : "false");
+    });
+    // A rejected opportunity stays visible now (so the click reads as
+    // acknowledged) but is filtered out of the next search.
+    card.classList.toggle(
+      "is-dismissed",
+      applied === "not_eligible" || applied === "irrelevant"
+    );
+  }
+
   function bindFeedbackButtons(root) {
     if (!root || root.dataset.feedbackBound === "true") return;
     root.dataset.feedbackBound = "true";
@@ -1487,50 +1652,28 @@
       const group = button.closest(".match-feedback");
       if (!card || !group || group.dataset.busy === "true") return;
 
-      // Everything the endpoint needs lives on the card. The live result list
-      // (`displayedMatches`) is local to loadMatches — referencing it here threw
-      // a ReferenceError on every click — and it never exists for cards
-      // restored from chat history.
+      // Everything the endpoint needs lives on the card, so this also works for
+      // cards restored from chat history.
       const grant = group.dataset;
-      if (!grant.source || !grant.externalId) return;
-
       const verdict = button.dataset.verdict || "";
+      if (!verdict || !grant.source || !grant.externalId) return;
+
       group.dataset.busy = "true";
       try {
-        const response = await fetch(feedbackUrl, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Accept: "application/json",
-            "X-CSRFToken": csrfToken,
-            "X-Requested-With": "XMLHttpRequest",
+        if (button.classList.contains("is-active")) {
+          // Clicking the chosen verdict again undoes it — no reason needed.
+          const data = await sendFeedback(grant, { verdict, mode: "clear" });
+          showFeedbackState(card, group, data.verdict || "");
+          return;
+        }
+        await askFeedbackReason({
+          verdict,
+          grantTitle: grant.title,
+          save: async (reason) => {
+            const data = await sendFeedback(grant, { verdict, mode: "set", note: reason });
+            showFeedbackState(card, group, data.verdict || "");
           },
-          credentials: "same-origin",
-          body: JSON.stringify({
-            source: grant.source,
-            external_id: grant.externalId,
-            verdict,
-            title: grant.title || "",
-            agency: grant.agency || "",
-            category: grant.category || "",
-            pop_state: grant.popState || "",
-          }),
         });
-        const data = await response.json().catch(() => ({}));
-        if (!response.ok || !data.ok) throw new Error("feedback_failed");
-
-        const applied = data.verdict || "";
-        group.querySelectorAll(".feedback-btn").forEach((btn) => {
-          const on = btn.dataset.verdict === applied;
-          btn.classList.toggle("is-active", on);
-          btn.setAttribute("aria-pressed", on ? "true" : "false");
-        });
-        // A rejected opportunity stays visible now (so the click reads as
-        // acknowledged) but is filtered out of the next search.
-        card.classList.toggle(
-          "is-dismissed",
-          applied === "not_eligible" || applied === "irrelevant"
-        );
       } catch (_) {
         /* leave the buttons as they were */
       } finally {

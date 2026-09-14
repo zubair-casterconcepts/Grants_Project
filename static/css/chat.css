@@ -1165,6 +1165,63 @@ body.chat-sidebar-collapsed .chat-sidebar-toggle {
   border-color: #912018;
 }
 
+.chat-modal-btn-primary {
+  background: var(--chat-green);
+  border-color: var(--chat-green);
+  color: #fff;
+}
+
+.chat-modal-btn-primary:hover {
+  background: #264234;
+  border-color: #264234;
+}
+
+.chat-modal-btn:disabled {
+  opacity: 0.65;
+  cursor: progress;
+}
+
+/* ——— Feedback reason popup ——— */
+.chat-feedback-card {
+  width: min(100%, 30rem);
+}
+
+.chat-feedback-reason {
+  display: block;
+  width: 100%;
+  min-height: 6.5rem;
+  max-height: 14rem;
+  margin-top: 0.9rem;
+  padding: 0.7rem 0.8rem;
+  border: 1px solid var(--chat-line);
+  border-radius: 12px;
+  background: #fff;
+  color: var(--chat-ink);
+  font: inherit;
+  font-size: 0.94rem;
+  line-height: 1.45;
+  resize: vertical;
+}
+
+.chat-feedback-reason:focus {
+  outline: none;
+  border-color: var(--chat-green);
+  box-shadow: 0 0 0 3px rgba(47, 79, 63, 0.12);
+}
+
+.chat-feedback-hint {
+  margin: 0.45rem 0 0;
+  font-size: 0.8rem;
+  line-height: 1.4;
+  color: var(--chat-muted);
+}
+
+.chat-feedback-error {
+  margin: 0.45rem 0 0;
+  font-size: 0.84rem;
+  color: #b42318;
+}
+
 .chat-modal-btn:focus-visible {
   outline: 2px solid var(--chat-green);
   outline-offset: 2px;

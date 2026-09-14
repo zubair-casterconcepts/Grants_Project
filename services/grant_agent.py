@@ -94,19 +94,32 @@ You are the Grants matching agent. Identify the strongest funding opportunities 
 
 
 def load_agent_instructions() -> str:
-    """Load system instructions from the external file, with a safe fallback."""
+    """
+    Agent system instructions: the hand-written file (or the built-in fallback),
+    followed by any rules learned from grant writers' feedback reasons.
+    """
+    base = _DEFAULT_AGENT_INSTRUCTIONS
     try:
         text = _INSTRUCTIONS_PATH.read_text(encoding="utf-8").strip()
         if text:
-            return text
-        logger.warning("Agent instructions file is empty; using built-in fallback")
+            base = text
+        else:
+            logger.warning("Agent instructions file is empty; using built-in fallback")
     except OSError:
         logger.warning(
             "Could not read %s; using built-in fallback",
             _INSTRUCTIONS_PATH,
             exc_info=True,
         )
-    return _DEFAULT_AGENT_INSTRUCTIONS
+
+    try:
+        from services.instruction_learning import learned_instructions_section
+
+        learned = learned_instructions_section()
+    except Exception:
+        logger.warning("Learned agent guidance unavailable", exc_info=True)
+        learned = ""
+    return f"{base}\n\n{learned}" if learned else base
 
 
 class GrantMatch(BaseModel):

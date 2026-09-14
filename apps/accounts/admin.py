@@ -2,6 +2,7 @@ from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin as DjangoUserAdmin
 
 from .models import (
+    AgentInstructionUpdate,
     Conversation,
     GrantFeedback,
     GrantUser,
@@ -118,11 +119,73 @@ class ConversationAdmin(admin.ModelAdmin):
 
 @admin.register(GrantFeedback)
 class GrantFeedbackAdmin(admin.ModelAdmin):
-    list_display = ("title", "user", "verdict", "agency", "category", "created_at")
+    list_display = ("title", "user", "verdict", "short_reason", "agency", "category", "created_at")
     list_filter = ("verdict", "source", "created_at")
-    search_fields = ("title", "agency", "category", "external_id", "user__username")
+    search_fields = ("title", "note", "agency", "category", "external_id", "user__username")
     autocomplete_fields = ("user",)
     readonly_fields = ("created_at", "updated_at")
+
+    @admin.display(description="Reason")
+    def short_reason(self, obj: GrantFeedback) -> str:
+        return (obj.note or "")[:80]
+
+
+@admin.register(AgentInstructionUpdate)
+class AgentInstructionUpdateAdmin(admin.ModelAdmin):
+    """Weekly learned rules. Only one update is active; edits apply within minutes."""
+
+    list_display = ("created_at", "period_end", "feedback_count", "status", "method", "is_active")
+    list_filter = ("status", "method", "is_active")
+    fields = (
+        "is_active",
+        "guidance",
+        "status",
+        "method",
+        "feedback_count",
+        "period_start",
+        "period_end",
+        "detail",
+        "created_at",
+    )
+    readonly_fields = (
+        "status",
+        "method",
+        "feedback_count",
+        "period_start",
+        "period_end",
+        "detail",
+        "created_at",
+    )
+    actions = ("activate_update", "deactivate_updates")
+
+    def save_model(self, request, obj, form, change):
+        from services.instruction_learning import clear_guidance_cache
+
+        if obj.is_active:
+            AgentInstructionUpdate.objects.exclude(pk=obj.pk).update(is_active=False)
+        super().save_model(request, obj, form, change)
+        clear_guidance_cache()
+
+    @admin.action(description="Activate the selected update (deactivates the others)")
+    def activate_update(self, request, queryset):
+        from services.instruction_learning import clear_guidance_cache
+
+        chosen = queryset.filter(status=AgentInstructionUpdate.Status.APPLIED).order_by("-created_at").first()
+        if chosen is None:
+            self.message_user(request, "Pick an applied update to activate.", level="warning")
+            return
+        AgentInstructionUpdate.objects.exclude(pk=chosen.pk).update(is_active=False)
+        AgentInstructionUpdate.objects.filter(pk=chosen.pk).update(is_active=True)
+        clear_guidance_cache()
+        self.message_user(request, f"Activated the update from {chosen.period_end:%Y-%m-%d}.")
+
+    @admin.action(description="Deactivate the selected updates")
+    def deactivate_updates(self, request, queryset):
+        from services.instruction_learning import clear_guidance_cache
+
+        count = queryset.update(is_active=False)
+        clear_guidance_cache()
+        self.message_user(request, f"Deactivated {count} update(s).")
 
 
 @admin.register(StarterPrompt)
