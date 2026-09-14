@@ -377,6 +377,17 @@ _APPLICANT_ORG_PATTERNS = (
     (re.compile(r"\bfiscal\s+sponsor(?:ship)?\b", re.I), "501c3"),
     (re.compile(r"\bgrant\s+intermediar(?:y|ies)\b", re.I), "501c3"),
     (re.compile(r"\b501\s*\(?c\)?\s*\(?3\)?\b", re.I), "501c3"),
+    # "grants for nonprofits" / "for local governments" / "for school districts"
+    # name the applicant too; without these a nonprofit's search was screened
+    # against the saved profile's org type instead.
+    (re.compile(r"\bfor\s+(?:an?\s+|our\s+)?non[-\s]?profits?\b", re.I), "501c3"),
+    (
+        re.compile(
+            r"\bfor\s+(?:our\s+)?(?:local|city|county|municipal|tribal)?\s*governments?\b", re.I
+        ),
+        "government",
+    ),
+    (re.compile(r"\bfor\s+(?:our\s+)?(?:public\s+)?school\s+districts?\b", re.I), "school"),
 )
 
 

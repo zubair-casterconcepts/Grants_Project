@@ -227,11 +227,78 @@ def _overseas_program(row: dict[str, Any]) -> str:
     return ""
 
 
-def check_geography(row: dict[str, Any], state: str) -> EligibilityVerdict:
-    """Is this opportunity locked to a state other than the applicant's?"""
+# Programs for organizations abroad that don't come from a U.S. embassy, e.g.
+# "Projects must be proposed by African organizations" or "UK-registered
+# charities". Demonyms only count next to an applicant word, so "African
+# American youth" stays domestic; "New England" is a U.S. region.
+_FOREIGN_PLACE = re.compile(
+    r"(?<![-\w])(?:africa|europe|united\s+kingdom|(?<!new\s)england|scotland|canada|australia|"
+    r"new\s+zealand|philippines|kenya|nigeria|uganda|ghana|ethiopia|tanzania|rwanda|india|"
+    r"pakistan|bangladesh|nepal)\b",
+    re.I,
+)
+_FOREIGN_APPLICANTS = re.compile(
+    r"\b(?:african|kenyan|nigerian|ugandan|ghanaian|ethiopian|canadian|australian|british|uk)"
+    r"[-\s]+(?:(?:based|registered|led)\s+)?(?:organi[sz]ations?|charit(?:y|ies)|ngos?|churches|"
+    r"institutions?|citizens|nationals|residents|non[-\s]?profits?)\b"
+    r"|\bfor\s+(?:africans|canadians|australians)\b",
+    re.I,
+)
+_US_APPLICANTS = re.compile(
+    r"\bu\.?s\.?[-\s]+(?:based|registered)\b|\bunited\s+states\b|\bin\s+the\s+u\.?s\.?a?\b|"
+    r"\bamerican\s+(?:organi[sz]ations?|non[-\s]?profits?|charit(?:y|ies))\b",
+    re.I,
+)
+
+
+def _foreign_program(row: dict[str, Any], home: str) -> str:
+    """Reason text when the program is for organizations outside the U.S."""
+    signal = " ".join(_text(row.get(key)) for key in ("title", "agency", "eligibility"))
+    if not (_FOREIGN_APPLICANTS.search(signal) or _FOREIGN_PLACE.search(signal)):
+        return ""
+    home_name = US_STATE_NAMES.get(home, "").lower()
+    if _US_APPLICANTS.search(signal) or (home_name and home_name in signal.lower()):
+        return ""
+    return "program for organizations outside the United States"
+
+
+# "City of Amarillo" as funder or applicant area: a city funds its own city.
+_LOCAL_GOVERNMENT = re.compile(
+    r"\b(?:[Cc]ity|[Tt]own|[Vv]illage|[Tt]ownship)\s+of\s+(?:the\s+)?"
+    r"([A-Z][A-Za-z.'\-]*(?:\s+[A-Z][A-Za-z.'\-]*){0,2})"
+)
+
+
+def _other_city_program(row: dict[str, Any], city: str) -> str:
+    """Reason text when this is another city's local program, else ""."""
+    home = _lower(city)
+    if not home:
+        return ""
+    signal = " ".join(_text(row.get(key)) for key in ("agency", "title", "eligibility"))
+    names = [match.group(1) for match in _LOCAL_GOVERNMENT.finditer(signal)]
+    if not names or re.search(rf"\b{re.escape(home)}\b", signal.lower()):
+        return ""
+    words = names[0].split("'")[0].split()
+    while len(words) > 1 and words[-1].lower() in _NOT_PLACE_WORDS:
+        words.pop()
+    return f"local program of the City of {' '.join(words)}, not {_text(city)}"
+
+
+_NOT_PLACE_WORDS = frozenset(
+    "economic development department office mayor council housing community "
+    "services planning county commission authority".split()
+)
+
+
+def check_geography(row: dict[str, Any], state: str, city: str = "") -> EligibilityVerdict:
+    """Is this opportunity locked to a state (or city) other than the applicant's?"""
     overseas = _overseas_program(row)
     if overseas:
         return EligibilityVerdict(INELIGIBLE, blockers=(overseas,))
+
+    foreign = _foreign_program(row, _text(state).upper())
+    if foreign:
+        return EligibilityVerdict(INELIGIBLE, blockers=(foreign,))
 
     home = _text(state).upper()
     if not home:
@@ -260,6 +327,9 @@ def check_geography(row: dict[str, Any], state: str) -> EligibilityVerdict:
 
     named = _states_mentioned(signal)
     if not named:
+        other_city = _other_city_program(row, city)
+        if other_city:
+            return EligibilityVerdict(INELIGIBLE, blockers=(other_city,))
         return EligibilityVerdict(UNVERIFIED, ("no geographic restriction found",))
     if home in named:
         return EligibilityVerdict(ELIGIBLE, (f"targets {home}",))
@@ -287,7 +357,74 @@ def check_applicable_record(row: dict[str, Any]) -> EligibilityVerdict:
             INELIGIBLE,
             blockers=(f"historical award, not an open opportunity{detail}",),
         )
+    # Aggregator placeholders ("Various local and regional foundations … direct
+    # funder must be verified") are not something anyone can apply to.
+    funder = " ".join(_text(row.get(key)) for key in ("agency", "top_agency"))
+    if _PLACEHOLDER_FUNDER.search(funder):
+        return EligibilityVerdict(
+            INELIGIBLE,
+            blockers=("not a specific opportunity: the funder isn't identified",),
+        )
     return EligibilityVerdict(ELIGIBLE, ("open opportunity",))
+
+
+_PLACEHOLDER_FUNDER = re.compile(
+    r"\bvarious\b[^.]{0,60}\b(?:funders?|foundations?|sources|organi[sz]ations|donors|grantmakers)\b"
+    r"|\bmust\s+be\s+verified\b|\baggregator\b",
+    re.I,
+)
+
+
+# ── Gate: award size vs budget ──────────────────────────────────────────────
+
+_MONEY_RE = re.compile(r"(\d[\d,]*(?:\.\d+)?)\s*(k|mm|m|thousand|million|billion|b)?\b", re.I)
+_MONEY_UNITS = {"k": 1e3, "thousand": 1e3, "m": 1e6, "mm": 1e6, "million": 1e6, "b": 1e9, "billion": 1e9}
+
+
+def _money_amounts(value: Any) -> list[float]:
+    amounts: list[float] = []
+    for match in _MONEY_RE.finditer(_text(value)):
+        try:
+            number = float(match.group(1).replace(",", ""))
+        except ValueError:
+            continue
+        amounts.append(number * _MONEY_UNITS.get((match.group(2) or "").lower(), 1))
+    return amounts
+
+
+def check_budget_fit(row: dict[str, Any], profile: dict[str, Any]) -> EligibilityVerdict:
+    """
+    Can an award from this program be the size the user asked for?
+
+    Uses only the published per-award minimum/maximum — never program totals
+    like "$6 million total" — and skips $0 / missing values, which mean unknown.
+    """
+    requested = max(_money_amounts(profile.get("budget_requested")) or [0.0])
+    upper = max(_money_amounts(profile.get("budget_max")) or [0.0])
+    low = requested or upper
+    high = max(upper, low)
+    if low <= 0:
+        return EligibilityVerdict(UNVERIFIED, ("no budget on profile",))
+
+    floors = [v for v in _money_amounts(row.get("award_floor")) if v > 0]
+    ceilings = [v for v in _money_amounts(row.get("award_ceiling")) if v > 0]
+    floor = min(floors) if floors else None
+    ceiling = max(ceilings) if ceilings else None
+    if floor is not None and ceiling is not None and floor > ceiling:
+        floor = None
+    if floor is not None and floor > high * 2:
+        return EligibilityVerdict(
+            INELIGIBLE,
+            blockers=(f"minimum award ${floor:,.0f} is far above your budget (${high:,.0f})",),
+        )
+    if ceiling is not None and ceiling < low * 0.25:
+        return EligibilityVerdict(
+            INELIGIBLE,
+            blockers=(f"maximum award ${ceiling:,.0f} is far below your budget (${low:,.0f})",),
+        )
+    if floor is None and ceiling is None:
+        return EligibilityVerdict(UNVERIFIED, ("award size not published",))
+    return EligibilityVerdict(ELIGIBLE, ("award size fits your budget",))
 
 
 # ── Gate 4: topic connection ────────────────────────────────────────────────
@@ -421,6 +558,12 @@ def check_topic_connection(
     # a K-6 literacy search.
     distinctive = found - _WEAK_TOPIC_TERMS
     if distinctive:
+        # One focus word, only in the description, on a program whose category is
+        # something else ("…through education or economic empowerment" on an
+        # Education grant) is a passing mention, not a program about your focus.
+        passing = _passing_mention(row, profile, found)
+        if passing:
+            return EligibilityVerdict(INELIGIBLE, blockers=(passing,))
         sample = ", ".join(sorted(distinctive)[:3])
         return EligibilityVerdict(ELIGIBLE, (f"matches your focus ({sample})",))
 
@@ -470,6 +613,45 @@ def check_topic_connection(
     )
 
 
+def _passing_mention(row: dict[str, Any], profile: dict[str, Any], found: set[str]) -> str:
+    if len(found) != 1:
+        return ""
+    from services.grant_categories import FALLBACK_CATEGORY, derive_category, normalize_category
+
+    wanted = normalize_category(profile.get("priority_area"))
+    actual = normalize_category(row.get("category")) or derive_category(row)
+    if not wanted or not actual or actual in (wanted, FALLBACK_CATEGORY):
+        return ""
+    headline = " ".join(
+        str(row.get(key) or "") for key in ("title", "funding_categories", "category")
+    ).lower()
+    if found & set(_WORD_RE.findall(headline)):
+        return ""
+    # Neighbouring categories overlap: a literacy program is often filed under
+    # Education. There, the focus word itself ("literacy") is a real match; only
+    # a loosely related word ("library") is still a passing mention.
+    core = set(_WORD_RE.findall(wanted.lower())) - _TOPIC_STOPWORDS
+    if actual in _RELATED_CATEGORIES.get(wanted, frozenset()) and found & core:
+        return ""
+    term = next(iter(found))
+    return f"mentions {term} only in passing; this program is about {actual}"
+
+
+_CATEGORY_GROUPS = (
+    {"Education", "Literacy", "Youth Development"},
+    {"Economic Development", "Workforce Development", "Community Development"},
+    {"Housing", "Community Development", "Human Services"},
+    {"Health", "Human Services", "Food Access"},
+    {"Arts", "Culture", "Recreation"},
+    {"Environment", "Energy", "Agriculture", "Disaster Relief"},
+    {"Infrastructure", "Transportation"},
+)
+_RELATED_CATEGORIES: dict[str, frozenset[str]] = {}
+for _group in _CATEGORY_GROUPS:
+    for _name in _group:
+        _RELATED_CATEGORIES[_name] = _RELATED_CATEGORIES.get(_name, frozenset()) | frozenset(_group)
+
+
 # ── Combined gate ───────────────────────────────────────────────────────────
 
 
@@ -478,7 +660,9 @@ def evaluate(row: dict[str, Any], profile: dict[str, Any]) -> EligibilityVerdict
     checks = (
         check_applicable_record(row),
         check_applicant_type(row, _text(profile.get("org_type"))),
-        check_geography(row, _text(profile.get("location_state"))),
+        check_geography(
+            row, _text(profile.get("location_state")), _text(profile.get("location_city"))
+        ),
         check_topic_connection(row, profile),
     )
 
@@ -487,6 +671,12 @@ def evaluate(row: dict[str, Any], profile: dict[str, Any]) -> EligibilityVerdict
     for verdict in checks:
         blockers.extend(verdict.blockers)
         reasons.extend(verdict.reasons)
+    # Budget can rule an opportunity out, but an unpublished award size must not
+    # downgrade an otherwise verified one — so it only contributes blockers.
+    budget = check_budget_fit(row, profile)
+    blockers.extend(budget.blockers)
+    if budget.is_eligible:
+        reasons.extend(budget.reasons)
 
     if blockers:
         return EligibilityVerdict(INELIGIBLE, tuple(reasons), tuple(blockers))

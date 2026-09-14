@@ -337,7 +337,75 @@ def _parse_opportunity_date(value: Any) -> date | None:
                 return datetime.strptime(candidate, fmt).date()
             except ValueError:
                 continue
-    return None
+    # Providers wrap the date in other text: Grants.gov sends "Sep 20, 2026
+    # 12:00:00 AM EDT" and GrantedAI "Closes April 24, 2026, 5:00 p.m. EDT".
+    # Neither matched a whole-string format, so past deadlines were treated as
+    # unknown and kept. With several dates (LOI + full proposal), the last counts.
+    embedded = _dates_in_text(cleaned)
+    return max(embedded) if embedded else None
+
+
+_MONTH_NUMBERS = {
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+    "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+}
+_MONTH_WORD = (
+    r"(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|"
+    r"sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\.?"
+)
+_EMBEDDED_DATES = (
+    ("mdy_name", re.compile(rf"\b{_MONTH_WORD}\s+(\d{{1,2}})(?:st|nd|rd|th)?,?\s+(\d{{4}})\b", re.I)),
+    ("dmy_name", re.compile(rf"\b(\d{{1,2}})(?:st|nd|rd|th)?[\s-]+{_MONTH_WORD},?[\s-]+(\d{{4}})\b", re.I)),
+    ("ymd", re.compile(r"\b(\d{4})[-/](\d{1,2})[-/](\d{1,2})\b")),
+    ("mdy", re.compile(r"\b(\d{1,2})[/-](\d{1,2})[/-](\d{4})\b")),
+)
+
+
+def _dates_in_text(text: str) -> list[date]:
+    """Every calendar date written anywhere in `text`."""
+    found: list[date] = []
+    for kind, pattern in _EMBEDDED_DATES:
+        for match in pattern.finditer(text or ""):
+            first, second, third = match.groups()
+            try:
+                if kind == "mdy_name":
+                    year, month, day = int(third), _MONTH_NUMBERS[first[:3].lower()], int(second)
+                elif kind == "dmy_name":
+                    year, month, day = int(third), _MONTH_NUMBERS[second[:3].lower()], int(first)
+                elif kind == "ymd":
+                    year, month, day = int(first), int(second), int(third)
+                else:
+                    year, month, day = int(third), int(first), int(second)
+                if 2000 <= year <= 2100:
+                    found.append(date(year, month, day))
+            except (KeyError, ValueError):
+                continue
+    return found
+
+
+# "Applications are due March 1, 2026" / "Deadline: 04/24/2026" inside the
+# description, for sources that leave the deadline field empty.
+_DEADLINE_PHRASE = re.compile(
+    r"\b(?:deadlines?|due(?!\s+to\b)(?:\s+date)?|clos(?:es|ing\s+date|e\s+date)|"
+    r"submitted\s+(?:by|before|no\s+later\s+than)|submissions?\s+(?:by|before)|"
+    r"accepted\s+(?:through|until)|no\s+later\s+than)\b[^;\n]{0,60}",
+    re.I,
+)
+_TITLE_YEAR = re.compile(r"\b(20\d{2})\b")
+
+
+def _deadline_in_text(row: dict[str, Any]) -> date | None:
+    text = " ".join(str(row.get(key) or "") for key in ("description", "eligibility"))
+    dates: list[date] = []
+    for match in _DEADLINE_PHRASE.finditer(text):
+        dates.extend(_dates_in_text(match.group(0)))
+    return max(dates) if dates else None
+
+
+def _title_years_all_past(row: dict[str, Any], today: date) -> bool:
+    """A title naming only past years ("2024 Community Grants") is an old cycle."""
+    years = [int(year) for year in _TITLE_YEAR.findall(str(row.get("title") or ""))]
+    return bool(years) and max(years) < today.year
 
 
 def _max_open_age_months() -> int:
@@ -361,6 +429,8 @@ def _is_actionable_opportunity(row: dict[str, Any], *, today: date | None = None
 
     - Closed/archived/expired statuses → drop
     - Parseable deadline before today → drop (even if only days old)
+    - No deadline field, but a past "due/deadline/closes" date in the text → drop
+    - No deadline, and the title names only past years → drop
     - No deadline, but open_date older than GRANT_MAX_OPEN_AGE_MONTHS → drop
     - No usable dates → keep (avoid over-filtering unknown formats)
     """
@@ -369,8 +439,12 @@ def _is_actionable_opportunity(row: dict[str, Any], *, today: date | None = None
 
     now = today or date.today()
     deadline = _parse_opportunity_date(row.get("deadline"))
+    if deadline is None:
+        deadline = _deadline_in_text(row)
     if deadline is not None:
         return deadline >= now
+    if _title_years_all_past(row, now):
+        return False
 
     months = _max_open_age_months()
     if months <= 0:
