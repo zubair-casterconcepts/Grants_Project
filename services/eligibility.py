@@ -21,11 +21,12 @@ callers decide whether to keep or drop it.
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
 from typing import Any
 
-from services.location_utils import US_STATE_NAMES
+from services.location_utils import CITY_STATE_HINTS, US_STATE_NAMES
 
 ELIGIBLE = "eligible"
 INELIGIBLE = "ineligible"
@@ -188,13 +189,31 @@ def check_applicant_type(row: dict[str, Any], org_type: str) -> EligibilityVerdi
 # ── Gate 2: geography ───────────────────────────────────────────────────────
 
 
+# City names that contain a state's name, and "Washington, D.C.", must not read
+# as that state ("Kansas City" is in Missouri).
+_CITY_WITH_STATE_WORD = re.compile(
+    r"\b(?:kansas|oklahoma|iowa|carson|texas|jersey|salt\s+lake|nevada)\s+city\b|\bvirginia\s+beach\b",
+    re.I,
+)
+_DC_RE = re.compile(r"\bwashington,?\s*d\.?\s*c\b\.?", re.I)
+
+
+def _state_names_in(text: str) -> set[str]:
+    """States written out in full. Longest names first, so "West Virginia" is not also Virginia."""
+    cleaned = _CITY_WITH_STATE_WORD.sub(" ", _DC_RE.sub(" district of columbia ", text or ""))
+    lowered = " " + re.sub(r"[^a-z]+", " ", cleaned.lower()) + " "
+    found: set[str] = set()
+    for name in sorted(_STATE_NAME_TO_ABBR, key=len, reverse=True):
+        token = f" {name} "
+        if token in lowered:
+            found.add(_STATE_NAME_TO_ABBR[name])
+            lowered = lowered.replace(token, "  ")
+    return found
+
+
 def _states_mentioned(text: str) -> set[str]:
     """State codes explicitly named in a phrase (full names, then upper codes)."""
-    found: set[str] = set()
-    lowered = f" {text.lower()} "
-    for name, abbr in _STATE_NAME_TO_ABBR.items():
-        if f" {name} " in lowered:
-            found.add(abbr)
+    found = _state_names_in(text)
     for abbr in US_STATE_NAMES:
         # Only uppercase-as-written codes, so "in"/"or"/"me" are not states.
         if re.search(rf"\b{abbr}\b", text):
@@ -290,8 +309,139 @@ _NOT_PLACE_WORDS = frozenset(
 )
 
 
+# Well-known cities → state, so "City of Houston" or "San Antonio Area
+# Foundation" places a program even when no state is written. Names that are
+# also common words or first names (Phoenix House, Charlotte, Savannah) are left
+# out on purpose.
+_CITY_STATES: dict[str, str] = {
+    **{name: code for name, code in CITY_STATE_HINTS.items() if name not in {"queens", "phoenix"}},
+    "birmingham": "AL", "montgomery": "AL", "huntsville": "AL",
+    "anchorage": "AK", "fairbanks": "AK", "juneau": "AK",
+    "tucson": "AZ", "mesa": "AZ", "scottsdale": "AZ", "tempe": "AZ", "flagstaff": "AZ",
+    "little rock": "AR",
+    "san diego": "CA", "san jose": "CA", "sacramento": "CA", "oakland": "CA", "fresno": "CA",
+    "long beach": "CA", "bakersfield": "CA", "anaheim": "CA", "stockton": "CA", "santa ana": "CA",
+    "colorado springs": "CO", "boulder": "CO",
+    "hartford": "CT", "new haven": "CT", "bridgeport": "CT",
+    "orlando": "FL", "tampa": "FL", "jacksonville": "FL", "st. petersburg": "FL",
+    "tallahassee": "FL", "fort lauderdale": "FL",
+    "honolulu": "HI", "boise": "ID",
+    "indianapolis": "IN", "fort wayne": "IN",
+    "des moines": "IA", "cedar rapids": "IA", "iowa city": "IA",
+    "wichita": "KS", "topeka": "KS", "louisville": "KY",
+    "new orleans": "LA", "baton rouge": "LA", "shreveport": "LA",
+    "baltimore": "MD",
+    "grand rapids": "MI", "lansing": "MI", "ann arbor": "MI", "kalamazoo": "MI",
+    "minneapolis": "MN", "saint paul": "MN", "st. paul": "MN", "duluth": "MN",
+    "st. louis": "MO", "saint louis": "MO", "kansas city": "MO",
+    "billings": "MT", "missoula": "MT", "omaha": "NE",
+    "las vegas": "NV", "reno": "NV", "carson city": "NV",
+    "newark": "NJ", "jersey city": "NJ", "trenton": "NJ",
+    "albuquerque": "NM", "santa fe": "NM",
+    "new york city": "NY", "bronx": "NY", "syracuse": "NY", "yonkers": "NY",
+    "raleigh": "NC", "greensboro": "NC",
+    "fargo": "ND", "bismarck": "ND",
+    "cleveland": "OH", "cincinnati": "OH", "toledo": "OH", "akron": "OH", "dayton": "OH",
+    "oklahoma city": "OK", "tulsa": "OK",
+    "pittsburgh": "PA", "allentown": "PA", "providence": "RI", "sioux falls": "SD",
+    "nashville": "TN", "memphis": "TN", "knoxville": "TN", "chattanooga": "TN",
+    "san antonio": "TX", "fort worth": "TX", "el paso": "TX", "amarillo": "TX", "lubbock": "TX",
+    "corpus christi": "TX", "plano": "TX", "laredo": "TX", "texas city": "TX",
+    "salt lake city": "UT", "provo": "UT", "virginia beach": "VA",
+    "spokane": "WA", "tacoma": "WA", "milwaukee": "WI", "cheyenne": "WY",
+}
+_CITY_ALIASES = {
+    "nyc": "new york", "new york city": "new york", "brooklyn": "new york",
+    "manhattan": "new york", "bronx": "new york", "st. paul": "saint paul", "st. louis": "saint louis",
+}
+_CITY_RE = re.compile(
+    r"(?<![\w.])("
+    + "|".join(re.escape(name) for name in sorted(_CITY_STATES, key=len, reverse=True))
+    + r")(?!\w)"
+)
+
+
+def _canonical_city(name: str) -> str:
+    key = _lower(name)
+    return _CITY_ALIASES.get(key, key)
+
+
+def _cities_in(text: str) -> dict[str, str]:
+    """Known cities named in the text → their state code."""
+    return {
+        _canonical_city(match.group(1)): _CITY_STATES[match.group(1)]
+        for match in _CITY_RE.finditer((text or "").lower())
+    }
+
+
+# "Open nationwide", "any state", "across the United States": an explicit
+# statement that location does not matter, which outranks a state named in passing.
+_NATIONWIDE_TEXT = re.compile(
+    r"\bnationwide\b|\ball\s+(?:50\s+)?states\b|\bany\s+(?:u\.s\.\s+)?state\b|"
+    r"\b(?:across|throughout)\s+the\s+(?:u\.s\.|united\s+states|country|nation)\b",
+    re.I,
+)
+# Federal or national funders fund applicants in every state unless they say otherwise.
+# Acronyms must match as written (so "us" in a title is not "US"); names match
+# in any case.
+_FEDERAL_ACRONYMS = re.compile(
+    r"\bUS\s+(?:Department|Dept|Agency)\b|"
+    r"\b(?:USDA|HUD|NASA|NSF|NIH|EPA|FEMA|HHS|ACF|HRSA|SAMHSA|CDC|DOE|DOL|DOJ|DOT|NEH|NEA|IMLS|"
+    r"SBA|EDA|NOAA|IHS|BIA)\b"
+)
+_FEDERAL_NAMES = re.compile(
+    r"\bu\.s\.|\bunited\s+states\b|\bfederal\b|\bnational\b|\bamericorps\b|"
+    r"\badministration\s+for\s+children\s+and\s+families\b|"
+    r"\bdepartment\s+of\s+(?:agriculture|commerce|education|energy|health\s+and\s+human\s+services|"
+    r"homeland\s+security|housing\s+and\s+urban\s+development|(?:the\s+)?interior|justice|labor|"
+    r"transportation|(?:the\s+)?treasury|veterans\s+affairs)\b",
+    re.I,
+)
+# Phrases that tie a program to a place: "serving counties in West Virginia",
+# "nonprofits located in Ohio", "residents of Houston".
+_RESTRICTION_WINDOW = re.compile(
+    r"\b(?:located|based|headquartered|operating|residing|serving|serves|residents|communities|"
+    r"counties|organi[sz]ations|nonprofits|schools|applicants|businesses)\s+"
+    r"(?:of|in|within|throughout|across)\s+([^.;\n]{0,80})",
+    re.I,
+)
+
+
+def _strict_location() -> bool:
+    return os.getenv("GRANT_STRICT_LOCATION", "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _hide_nationwide() -> bool:
+    """
+    Grant writers asked for results located in the place they searched only, so a
+    federal or nationwide program that is not tied to that place is hidden too.
+    GRANT_HIDE_NATIONWIDE=0 shows those programs again.
+    """
+    return os.getenv("GRANT_HIDE_NATIONWIDE", "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _field_states(value: Any) -> tuple[set[str], bool]:
+    """States in an explicit state field ("CA", "['CA', 'NV']", "Nationwide")."""
+    text = _text(value)
+    if not text:
+        return set(), False
+    if _NATIONWIDE_TEXT.search(text) or text.lower() in {"all", "national", "us", "usa"}:
+        return set(), True
+    codes = {code for code in re.findall(r"\b[A-Z]{2}\b", text.upper()) if code in US_STATE_NAMES}
+    return codes | _state_names_in(text), False
+
+
 def check_geography(row: dict[str, Any], state: str, city: str = "") -> EligibilityVerdict:
-    """Is this opportunity locked to a state (or city) other than the applicant's?"""
+    """
+    Is this opportunity available where the user asked for?
+
+    Grant writers asked for strict location matching: a program must be tied to
+    the requested state (and not to a different city, when one is given). Programs
+    tied to another state or city are dropped; a local or foundation program that
+    gives no sign of where it funds is dropped (GRANT_STRICT_LOCATION=0 keeps
+    those); and a federal or nationwide program that never names the requested
+    place is hidden as well (GRANT_HIDE_NATIONWIDE=0 shows those).
+    """
     overseas = _overseas_program(row)
     if overseas:
         return EligibilityVerdict(INELIGIBLE, blockers=(overseas,))
@@ -303,40 +453,89 @@ def check_geography(row: dict[str, Any], state: str, city: str = "") -> Eligibil
     home = _text(state).upper()
     if not home:
         return EligibilityVerdict(UNVERIFIED, ("no home state on profile",))
+    home_name = US_STATE_NAMES.get(home, home)
+    home_city = _canonical_city(city)
+    place = f"{_text(city)}, {home}" if home_city else home_name
+    strict = _strict_location()
+    hide_nationwide = _hide_nationwide()
+    not_local = EligibilityVerdict(
+        INELIGIBLE, blockers=(f"nationwide program, not specific to {place}",)
+    )
 
     # Explicit place of performance wins when the source provides it.
-    pop = _text(row.get("pop_state") or row.get("state")).upper()
-    if pop:
-        if pop == home:
+    field_states, field_nationwide = _field_states(row.get("pop_state") or row.get("state"))
+    if field_nationwide:
+        return not_local if hide_nationwide else EligibilityVerdict(ELIGIBLE, ("nationwide program",))
+    if field_states:
+        if home in field_states:
             return EligibilityVerdict(ELIGIBLE, (f"located in {home}",))
         return EligibilityVerdict(
-            INELIGIBLE, blockers=(f"restricted to {pop}, not {home}",)
+            INELIGIBLE, blockers=(f"restricted to {', '.join(sorted(field_states))}, not {home}",)
         )
 
-    # Otherwise infer from the strongest restriction signals: who is funding it
-    # and what the opportunity is called. A state agency funds its own state.
-    signal = " ".join(
-        [
-            _text(row.get("agency")),
-            _text(row.get("top_agency")),
-            _text(row.get("title")),
-        ]
+    # Who funds it and what it is called are the strongest signals; the
+    # eligibility text is next. A state agency funds its own state.
+    headline = " ".join(_text(row.get(key)) for key in ("agency", "top_agency", "title"))
+    eligibility = _text(row.get("eligibility"))
+    description = _text(row.get("description"))
+    federal = (
+        _lower(row.get("source")) == "grants_gov"
+        or bool(_text(row.get("agency_code")))
+        or bool(_FEDERAL_ACRONYMS.search(headline) or _FEDERAL_NAMES.search(headline))
     )
-    if any(marker in signal.lower() for marker in _NATIONAL_MARKERS):
+
+    nationwide = bool(_NATIONWIDE_TEXT.search(" ".join((headline, eligibility, description))))
+    if nationwide and not hide_nationwide:
         return EligibilityVerdict(ELIGIBLE, ("nationwide program",))
 
-    named = _states_mentioned(signal)
-    if not named:
-        other_city = _other_city_program(row, city)
-        if other_city:
-            return EligibilityVerdict(INELIGIBLE, blockers=(other_city,))
-        return EligibilityVerdict(UNVERIFIED, ("no geographic restriction found",))
-    if home in named:
+    cities = _cities_in(f"{headline} {eligibility}")
+    named = _states_mentioned(headline) | _state_names_in(eligibility) | set(cities.values())
+    if not federal:
+        # Federal descriptions often say "applicants in Alaska are encouraged"
+        # without restricting anyone, so only non-federal text is read this way.
+        for window in _RESTRICTION_WINDOW.finditer(description):
+            named |= _state_names_in(window.group(1)) | set(_cities_in(window.group(1)).values())
+
+    if named:
+        if home not in named:
+            others = ", ".join(sorted(named))
+            return EligibilityVerdict(INELIGIBLE, blockers=(f"targets {others}, not {home}",))
+        # In the right state. When the user named a city, a program local to a
+        # different city there is not theirs — unless it is a statewide program
+        # (the funder or title names the state itself).
+        if strict and home_city and home_city not in cities and home not in _states_mentioned(headline):
+            local = sorted(name for name, code in cities.items() if code == home)
+            if local:
+                return EligibilityVerdict(
+                    INELIGIBLE,
+                    blockers=(f"local to {local[0].title()}, not {_text(city)}",),
+                )
         return EligibilityVerdict(ELIGIBLE, (f"targets {home}",))
-    others = ", ".join(sorted(named))
-    return EligibilityVerdict(
-        INELIGIBLE, blockers=(f"targets {others}, not {home}",)
-    )
+
+    other_city = _other_city_program(row, city)
+    if other_city:
+        return EligibilityVerdict(INELIGIBLE, blockers=(other_city,))
+
+    if federal and not hide_nationwide:
+        return EligibilityVerdict(ELIGIBLE, ("federal program open to all states",))
+
+    everything = f"{headline} {eligibility} {description}"
+    if (
+        re.search(rf"\b{re.escape(home_name.lower())}\b", everything.lower())
+        or (home_city and home_city in _cities_in(everything))
+        or (home_city and re.search(rf"\b{re.escape(home_city)}\b", everything.lower()))
+        or re.search(rf"\b{home}\b", headline)
+    ):
+        return EligibilityVerdict(ELIGIBLE, (f"available in {home_name}",))
+
+    if hide_nationwide and (federal or nationwide):
+        return not_local
+
+    if strict:
+        return EligibilityVerdict(
+            INELIGIBLE, blockers=(f"not confirmed to be available in {place}",)
+        )
+    return EligibilityVerdict(UNVERIFIED, ("no geographic restriction found",))
 
 
 # ── Gate 3: record type ─────────────────────────────────────────────────────

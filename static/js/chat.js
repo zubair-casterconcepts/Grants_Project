@@ -2069,6 +2069,9 @@
     try {
       const streamUrl = new URL(matchesStreamUrl, window.location.origin);
       if (queryText) streamUrl.searchParams.set("q", queryText);
+      // Lets the server remember earlier requests in this chat, so a follow-up
+      // like "what about Texas?" keeps the topic and budget already given.
+      if (conversationId) streamUrl.searchParams.set("conversation", String(conversationId));
       const response = await fetch(streamUrl.toString(), {
         headers: { Accept: "text/event-stream" },
         credentials: "same-origin",
@@ -2136,6 +2139,7 @@
         // Fallback if stream ended without a done event.
         const fallbackUrl = new URL(matchesUrl, window.location.origin);
         if (queryText) fallbackUrl.searchParams.set("q", queryText);
+        if (conversationId) fallbackUrl.searchParams.set("conversation", String(conversationId));
         const fallback = await fetch(fallbackUrl.toString(), {
           headers: { Accept: "application/json" },
           credentials: "same-origin",

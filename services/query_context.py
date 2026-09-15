@@ -638,15 +638,101 @@ def parse_user_overrides(user_query: str) -> dict[str, Any]:
     return overrides
 
 
+# ── Conversation memory ─────────────────────────────────────────────────────
+# A follow-up in the same chat ("what about Texas?", "only for nonprofits",
+# "budget 100k") builds on the earlier searches instead of starting over from the
+# saved profile, so the chat reads like a conversation.
+
+_RESET_MEMORY_RE = re.compile(
+    r"\b(?:start\s+(?:over|fresh|again)|new\s+search|reset|clear\s+(?:all\s+|the\s+)?filters|"
+    r"forget\s+(?:that|this|everything|previous|earlier|the\s+(?:previous|earlier))|"
+    r"(?:use|from|with)\s+my\s+(?:saved\s+)?(?:profile|project))\b",
+    re.I,
+)
+# Words a follow-up uses to point back at the last search. They are not a topic,
+# so "only those ones" must not replace the topic the user already gave.
+_FOLLOW_UP_WORDS = frozenset(
+    """
+    only just also instead what about how those these them ones one same again
+    more less show please filter narrow limit and but now then that this other
+    another different results result list okay ok yes no thanks thank which
+    any some there here make set change update increase decrease lower raise
+    try can could would should switch give want need see let lets apply
+    """.split()
+)
+_LOCATION_KEYS = ("location_state", "location_city")
+_BUDGET_KEYS = ("budget_requested", "budget_max")
+
+
+def _topic_words_only(overrides: dict[str, Any]) -> dict[str, Any]:
+    """Drop follow-up wording from a parsed keyword; drop the keyword if nothing is left."""
+    keyword = str(overrides.get("keyword") or "")
+    if not keyword:
+        return overrides
+    kept = " ".join(word for word in keyword.split() if word.lower() not in _FOLLOW_UP_WORDS)
+    cleaned = {key: value for key, value in overrides.items() if key not in ("keyword", "title")}
+    if len(kept) >= 3:
+        cleaned["keyword"] = kept
+        cleaned["title"] = kept
+    return cleaned
+
+
+def _merge_overrides(base: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]:
+    """Newer request wins field by field; location and budget change as a unit."""
+    merged = dict(base)
+    for group in (_LOCATION_KEYS, _BUDGET_KEYS):
+        if any(new.get(key) not in (None, "") for key in group):
+            for key in group:
+                merged.pop(key, None)
+    if new.get("priority_area"):
+        # A new focus area replaces the old topic entirely.
+        for key in ("priority_area", "keyword", "title"):
+            merged.pop(key, None)
+    elif new.get("keyword"):
+        # New subject words within the same focus area.
+        merged.pop("keyword", None)
+        merged.pop("title", None)
+    for key, value in new.items():
+        if value not in (None, ""):
+            merged[key] = value
+    return merged
+
+
+def conversation_overrides(history: list[str] | None, user_query: str) -> dict[str, Any]:
+    """
+    Search overrides for the latest message, remembering earlier requests in the
+    same conversation. `history` is the earlier search messages, oldest first.
+    Anything the latest message states wins; anything it leaves out is carried
+    over. "Start over" / "use my profile" forgets the earlier requests.
+    """
+    current = parse_user_overrides(user_query)
+    if not history or _RESET_MEMORY_RE.search(user_query or ""):
+        return current
+    carried: dict[str, Any] = {}
+    for text in history:
+        if _RESET_MEMORY_RE.search(text or ""):
+            carried = {}
+            continue
+        carried = _merge_overrides(carried, _topic_words_only(parse_user_overrides(text)))
+    return _merge_overrides(carried, _topic_words_only(current))
+
+
 def resolve_search_context(
     profile: Any,
     user_query: str = "",
+    history: list[str] | None = None,
 ) -> dict[str, Any]:
     """
     Profile fields are defaults. User query overrides win for this request only.
+
+    `history` (earlier search messages in the same conversation, oldest first)
+    lets a follow-up keep the location, topic, budget and org type it doesn't
+    restate.
     """
     defaults = profile_defaults(profile)
-    overrides = parse_user_overrides(user_query)
+    overrides = (
+        conversation_overrides(history, user_query) if history else parse_user_overrides(user_query)
+    )
 
     effective = dict(defaults)
     applied: dict[str, Any] = {}

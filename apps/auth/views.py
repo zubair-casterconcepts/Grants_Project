@@ -17,7 +17,7 @@ from apps.accounts.chat_services import (
     upsert_project_for_conversation,
 )
 from apps.accounts.forms import ProfileAccountForm, ProfileIntakeForm, STATE_CHOICES
-from apps.accounts.models import Conversation, GrantFeedback, Profile, SavedGrant
+from apps.accounts.models import Conversation, GrantFeedback, Message, Profile, SavedGrant
 from apps.accounts.services import feedback_signals, get_or_create_profile
 from services.grant_agent import iter_grant_matching_events, run_grant_matching_agent
 from services.location_utils import normalize_location
@@ -238,6 +238,48 @@ def home_view(request):
     )
 
 
+# The chat's reply to a search: result cards (metadata type "matches"), or this
+# text when everything was screened out.
+_EMPTY_SEARCH_REPLY = "I couldn't find eligible opportunities"
+_HISTORY_MAX = 8
+
+
+def _search_history(user, profile, raw_conversation_id) -> list[str]:
+    """
+    Earlier search requests in this conversation, oldest first — the chat's memory.
+
+    Only user messages that got a search answer count: never intake answers, and
+    never the message being searched right now (it has no answer yet). Messages
+    from before the profile was last saved are skipped, because the project they
+    refined has changed since.
+    """
+    try:
+        conversation_id = int(raw_conversation_id)
+    except (TypeError, ValueError):
+        return []
+    conversation = Conversation.objects.filter(pk=conversation_id, user=user).first()
+    if conversation is None:
+        return []
+    recent = conversation.messages.all()
+    if getattr(profile, "updated_at", None):
+        recent = recent.filter(created_at__gt=profile.updated_at)
+    rows = list(recent.order_by("-created_at", "-id").values("role", "content", "metadata")[:60])
+    rows.reverse()
+
+    history: list[str] = []
+    pending = ""
+    for row in rows:
+        content = str(row.get("content") or "").strip()
+        if row.get("role") == Message.Role.USER:
+            pending = content
+            continue
+        meta = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        if pending and (meta.get("type") == "matches" or content.startswith(_EMPTY_SEARCH_REPLY)):
+            history.append(pending[:500])
+        pending = ""
+    return history[-_HISTORY_MAX:]
+
+
 @login_required
 @require_GET
 def matches_api_view(request):
@@ -248,13 +290,15 @@ def matches_api_view(request):
 
     try:
         user_query = (request.GET.get("q") or "").strip()
+        history = _search_history(request.user, profile, request.GET.get("conversation"))
         matches = run_grant_matching_agent(
             profile,
             user_query=user_query,
             feedback=feedback_signals(request.user),
+            history=history,
         )
         prepared, saved_count = _prepare_matches(request.user, matches)
-        ctx = resolve_search_context(profile, user_query=user_query)
+        ctx = resolve_search_context(profile, user_query=user_query, history=history)
         return JsonResponse(
             {
                 "matches": prepared,
@@ -287,14 +331,16 @@ def matches_stream_api_view(request):
         return JsonResponse({"error": "onboarding_required"}, status=403)
 
     user_query = (request.GET.get("q") or "").strip()
-    # Read verdicts once, before streaming starts — the generator runs outside
-    # the request/response cycle and should not hold extra DB work open.
+    # Read verdicts and conversation memory once, before streaming starts — the
+    # generator runs outside the request/response cycle and should not hold
+    # extra DB work open.
     signals = feedback_signals(request.user)
+    history = _search_history(request.user, profile, request.GET.get("conversation"))
 
     def event_stream():
         try:
             for event in iter_grant_matching_events(
-                profile, user_query=user_query, feedback=signals
+                profile, user_query=user_query, feedback=signals, history=history
             ):
                 payload = dict(event)
                 if "matches" in payload:

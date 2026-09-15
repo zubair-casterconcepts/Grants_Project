@@ -241,7 +241,29 @@ def _prompt_context(payload: dict[str, Any]) -> dict[str, Any]:
     raised TypeError, silently pushing every user who had ever clicked a
     feedback button off the agent path and onto the fallback.
     """
-    return {key: value for key, value in payload.items() if key != "feedback"}
+    return {
+        key: value
+        for key, value in payload.items()
+        if key not in ("feedback", "conversation_history")
+    }
+
+
+def _history_block(payload: dict[str, Any]) -> str:
+    """Earlier requests in this chat, so the agent reads a follow-up in context."""
+    history = [
+        str(text).strip()
+        for text in payload.get("conversation_history") or []
+        if str(text).strip()
+    ]
+    if not history:
+        return ""
+    lines = "\n".join(f"- {text[:300]}" for text in history[-8:])
+    return (
+        "EARLIER_REQUESTS_IN_THIS_CONVERSATION (oldest first). The latest message is a "
+        "follow-up to these; SEARCH_CONTEXT_JSON already carries forward whatever it "
+        "did not change:\n"
+        f"{lines}\n\n"
+    )
 
 
 def _matching_prompt(payload: dict[str, Any], user_query: str = "") -> str:
@@ -257,6 +279,7 @@ def _matching_prompt(payload: dict[str, Any], user_query: str = "") -> str:
         "applicant type, not restricted to another state, and still open. "
         "Preserve agency name, agency_address, and other provider fields. "
         "Set chance_percent to round(score * 100).\n\n"
+        f"{_history_block(payload)}"
         f"USER_QUERY:\n{(user_query or '').strip() or '(none — use all profile defaults)'}\n\n"
         f"SEARCH_CONTEXT_JSON:\n{json.dumps(_prompt_context(payload), indent=2, default=str)}"
     )
@@ -299,9 +322,13 @@ def _profile_payload(profile: Any) -> dict[str, Any]:
     return profile_defaults(profile)
 
 
-def _search_context(profile: Any, user_query: str = "") -> dict[str, Any]:
-    """Profile defaults + latest user-query overrides for tools/scoring."""
-    return resolve_search_context(profile, user_query=user_query or "")
+def _search_context(
+    profile: Any,
+    user_query: str = "",
+    history: list[str] | None = None,
+) -> dict[str, Any]:
+    """Profile defaults + conversation memory + latest user-query overrides."""
+    return resolve_search_context(profile, user_query=user_query or "", history=history)
 
 
 def _compact(items: list[dict[str, Any]], source: str) -> list[dict[str, Any]]:
@@ -1860,6 +1887,7 @@ async def aiter_grant_matching_events(
     user_query: str = "",
     *,
     feedback: dict[str, Any] | None = None,
+    history: list[str] | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     """
     Async progressive match events for SSE.
@@ -1867,10 +1895,14 @@ async def aiter_grant_matching_events(
 
     `feedback` carries the user's past Eligible / Not-eligible verdicts so
     rejected opportunities are suppressed and rejected funders rank lower.
+    `history` is the earlier search requests in this conversation (oldest
+    first), so a follow-up keeps what it doesn't restate.
     """
-    payload = _search_context(profile, user_query)
+    payload = _search_context(profile, user_query, history)
     if feedback:
         payload["feedback"] = feedback
+    if history:
+        payload["conversation_history"] = list(history)
     if _agent_enabled():
         try:
             async for event in _aiter_agent_events(profile, user_query, payload):
@@ -1890,11 +1922,12 @@ def iter_grant_matching_events(
     user_query: str = "",
     *,
     feedback: dict[str, Any] | None = None,
+    history: list[str] | None = None,
 ) -> Iterator[dict[str, Any]]:
     """Sync bridge for Django StreamingHttpResponse SSE."""
     yield from _iter_async_generator(
         aiter_grant_matching_events(
-            profile, user_query=user_query, feedback=feedback
+            profile, user_query=user_query, feedback=feedback, history=history
         )
     )
 
@@ -1994,13 +2027,15 @@ async def run_grant_matching_agent_async(
     *,
     max_results: int | None = None,
     feedback: dict[str, Any] | None = None,
+    history: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """
     Async matching: Agents SDK tools first, asyncio.gather fallback.
     Profile defaults apply unless user_query overrides specific fields.
     `max_results` caps the final ranked list (chat default 12; digests may raise it).
+    `history` is the earlier search requests in the same conversation.
     """
-    payload = _search_context(profile, user_query)
+    payload = _search_context(profile, user_query, history)
     limit = max(1, int(max_results or DEFAULT_RESULT_LIMIT))
     if feedback is not None:
         payload["feedback"] = feedback
@@ -2036,6 +2071,7 @@ def run_grant_matching_agent(
     *,
     max_results: int | None = None,
     feedback: dict[str, Any] | None = None,
+    history: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Sync bridge for /home/matches/ JSON endpoint and weekly digests."""
     return _run_async(
@@ -2044,5 +2080,6 @@ def run_grant_matching_agent(
             user_query=user_query,
             max_results=max_results,
             feedback=feedback,
+            history=history,
         )
     )

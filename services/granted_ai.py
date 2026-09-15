@@ -28,6 +28,38 @@ MAX_ATTEMPTS = 2
 _CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 _CACHE_TTL_SECONDS = 300
 
+# When GrantedAI is down, /discover answers HTTP 504 after ~30s and /grants takes
+# 25–55s, so one search could wait ~90s and Find Grants looked stuck. Cap the
+# wait per search, and after a search that timed out with nothing, skip GrantedAI
+# for a short while so the next searches don't wait on it again.
+_UNAVAILABLE_UNTIL = {"at": 0.0}
+
+
+def _env_seconds(name: str, default: float) -> float:
+    try:
+        return max(1.0, float(os.getenv(name, str(default))))
+    except ValueError:
+        return default
+
+
+def _search_budget_seconds() -> float:
+    return _env_seconds("GRANTED_AI_TIMEOUT_SECONDS", 30)
+
+
+def _cooldown_seconds() -> float:
+    return _env_seconds("GRANTED_AI_COOLDOWN_SECONDS", 120)
+
+
+def _task_body(task: asyncio.Task, name: str) -> dict[str, Any] | None:
+    """Result of a finished request task; None if it was cancelled or failed."""
+    if task.cancelled():
+        return None
+    exc = task.exception()
+    if exc is not None:
+        logger.warning("GrantedAI %s failed: %s", name, exc)
+        return None
+    return task.result()
+
 ORG_TYPE_MAP = {
     "501c3": "Nonprofit",
     "government": "Government",
@@ -184,7 +216,12 @@ async def _get_json_async(
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
             response = await client.get(url, params=query)
-        except (httpx.TimeoutException, httpx.ConnectError) as exc:
+        except httpx.TimeoutException as exc:
+            # A timed-out GrantedAI call has not succeeded on retry; retrying only
+            # doubled the wait and spent more of the daily request quota.
+            logger.warning("GrantedAI timed out (%s); not retrying", type(exc).__name__)
+            return None
+        except httpx.ConnectError as exc:
             last_error = f"{type(exc).__name__}: {exc}"
             logger.warning(
                 "GrantedAI timeout/connect (attempt %s/%s): %s",
@@ -212,7 +249,12 @@ async def _get_json_async(
             logger.warning("GrantedAI rate limit reached (429)")
             return None
 
-        if response.status_code in (500, 502, 503, 504):
+        if response.status_code == 504:
+            # Gateway timeout: GrantedAI's own server ran out of time. Same as above.
+            logger.warning("GrantedAI gateway timeout (HTTP 504); not retrying")
+            return None
+
+        if response.status_code in (500, 502, 503):
             last_error = f"HTTP {response.status_code}"
             await asyncio.sleep(0.5 * attempt)
             continue
@@ -282,6 +324,25 @@ async def search_grants_async(
     if cached and (time.time() - cached[0]) < _CACHE_TTL_SECONDS:
         return list(cached[1])
 
+    def _stale_results(why: str) -> list[dict[str, Any]]:
+        # GrantedAI is intermittent: the same request can return rows, an empty
+        # list, or HTTP 429 minutes apart. Rather than silently dropping a whole
+        # source, reuse this query's last good results for a few hours.
+        stale = _CACHE.get(key)
+        if stale and (time.time() - stale[0]) < _CACHE_TTL_SECONDS * 48:
+            logger.warning(
+                "GrantedAI %s; serving results cached %.0f min ago",
+                why,
+                (time.time() - stale[0]) / 60,
+            )
+            return list(stale[1])
+        return []
+
+    skip_for = _UNAVAILABLE_UNTIL["at"] - time.time()
+    if skip_for > 0:
+        logger.info("GrantedAI skipped: it timed out recently (retrying in %.0fs)", skip_for)
+        return _stale_results("was skipped because it timed out recently")
+
     async def _run(active: httpx.AsyncClient) -> list[dict[str, Any]]:
         results: list[dict[str, Any]] = []
 
@@ -302,6 +363,9 @@ async def search_grants_async(
         }
 
         # Kick both third-party GETs concurrently; prefer discover when it returns rows.
+        # Wait no longer than the search budget — whatever answered in time is used.
+        budget = _search_budget_seconds()
+        timed_out = False
         if use_discover:
             discover_task = asyncio.create_task(
                 _get_json_async(active, DISCOVER_URL, discover_params)
@@ -309,15 +373,14 @@ async def search_grants_async(
             grants_task = asyncio.create_task(
                 _get_json_async(active, GRANTS_URL, grants_params)
             )
-            discover_body, grants_body = await asyncio.gather(
-                discover_task, grants_task, return_exceptions=True
-            )
-            if isinstance(discover_body, BaseException):
-                logger.warning("GrantedAI discover failed: %s", discover_body)
-                discover_body = None
-            if isinstance(grants_body, BaseException):
-                logger.warning("GrantedAI grants failed: %s", grants_body)
-                grants_body = None
+            _, pending = await asyncio.wait({discover_task, grants_task}, timeout=budget)
+            if pending:
+                timed_out = True
+                for task in pending:
+                    task.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+            discover_body = _task_body(discover_task, "discover")
+            grants_body = _task_body(grants_task, "grants")
 
             rows = (discover_body or {}).get("data") if isinstance(discover_body, dict) else None
             if isinstance(rows, list):
@@ -336,7 +399,13 @@ async def search_grants_async(
                         if isinstance(row, dict)
                     ][:effective_limit]
         else:
-            body = await _get_json_async(active, GRANTS_URL, grants_params)
+            try:
+                body = await asyncio.wait_for(
+                    _get_json_async(active, GRANTS_URL, grants_params), timeout=budget
+                )
+            except asyncio.TimeoutError:
+                body = None
+                timed_out = True
             rows = (body or {}).get("data") if body else None
             if isinstance(rows, list):
                 results = [
@@ -349,17 +418,17 @@ async def search_grants_async(
             _CACHE[key] = (time.time(), results)
             return results
 
-        # GrantedAI is intermittent: the same request can return rows, an empty
-        # list, or HTTP 429 minutes apart. Rather than silently dropping a whole
-        # source, reuse this query's last good results for a few hours.
-        stale = _CACHE.get(key)
-        if stale and (time.time() - stale[0]) < _CACHE_TTL_SECONDS * 48:
+        if timed_out:
+            cooldown = _cooldown_seconds()
+            _UNAVAILABLE_UNTIL["at"] = time.time() + cooldown
             logger.warning(
-                "GrantedAI returned no results; serving results cached %.0f min ago",
-                (time.time() - stale[0]) / 60,
+                "GrantedAI did not answer within %.0fs; continuing without it "
+                "and skipping it for the next %.0fs",
+                budget,
+                cooldown,
             )
-            return list(stale[1])
-        return results
+            return _stale_results("timed out")
+        return _stale_results("returned no results")
 
     if client is not None:
         return await _run(client)
