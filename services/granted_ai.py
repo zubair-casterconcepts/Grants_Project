@@ -25,8 +25,21 @@ CONNECT_TIMEOUT = 8
 READ_TIMEOUT = 45
 MAX_ATTEMPTS = 2
 
+# Last good results per search. Every search calls GrantedAI; these are only used
+# when that call fails or times out, so a brief outage does not blank the source.
 _CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
-_CACHE_TTL_SECONDS = 300
+_FALLBACK_MAX_AGE_SECONDS = 3600
+
+
+def _reuse_seconds() -> float:
+    """
+    How long an identical search may reuse earlier results instead of calling
+    GrantedAI. Default 0: every search asks GrantedAI for current results.
+    """
+    try:
+        return max(0.0, float(os.getenv("GRANTED_AI_CACHE_SECONDS", "0")))
+    except ValueError:
+        return 0.0
 
 # When GrantedAI is down, /discover answers HTTP 504 after ~30s and /grants takes
 # 25–55s, so one search could wait ~90s and Find Grants looked stuck. Cap the
@@ -322,16 +335,17 @@ async def search_grants_async(
         limit=effective_limit,
         discover=use_discover,
     )
+    reuse_for = _reuse_seconds()
     cached = _CACHE.get(key)
-    if cached and (time.time() - cached[0]) < _CACHE_TTL_SECONDS:
+    if reuse_for and cached and (time.time() - cached[0]) < reuse_for:
         return list(cached[1])
 
     def _stale_results(why: str) -> list[dict[str, Any]]:
-        # GrantedAI is intermittent: the same request can return rows, an empty
-        # list, or HTTP 429 minutes apart. Rather than silently dropping a whole
-        # source, reuse this query's last good results for a few hours.
+        # Only after a real failure: GrantedAI is intermittent, so rather than
+        # silently dropping the source, reuse this search's last good results if
+        # they are recent. A successful empty answer is never replaced by these.
         stale = _CACHE.get(key)
-        if stale and (time.time() - stale[0]) < _CACHE_TTL_SECONDS * 48:
+        if stale and (time.time() - stale[0]) < _FALLBACK_MAX_AGE_SECONDS:
             logger.warning(
                 "GrantedAI %s; serving results cached %.0f min ago",
                 why,
@@ -343,7 +357,7 @@ async def search_grants_async(
     skip_for = _UNAVAILABLE_UNTIL["at"] - time.time()
     if skip_for > 0:
         logger.info("GrantedAI skipped: it timed out recently (retrying in %.0fs)", skip_for)
-        return _stale_results("was skipped because it timed out recently")
+        return []
 
     async def _run(active: httpx.AsyncClient) -> list[dict[str, Any]]:
         results: list[dict[str, Any]] = []
@@ -368,6 +382,7 @@ async def search_grants_async(
         # Wait no longer than the search budget — whatever answered in time is used.
         budget = _search_budget_seconds()
         timed_out = False
+        failed = False
         if use_discover:
             discover_task = asyncio.create_task(
                 _get_json_async(active, DISCOVER_URL, discover_params)
@@ -383,6 +398,7 @@ async def search_grants_async(
                 await asyncio.gather(*pending, return_exceptions=True)
             discover_body = _task_body(discover_task, "discover")
             grants_body = _task_body(grants_task, "grants")
+            failed = discover_body is None and grants_body is None
 
             rows = (discover_body or {}).get("data") if isinstance(discover_body, dict) else None
             if isinstance(rows, list):
@@ -408,6 +424,7 @@ async def search_grants_async(
             except asyncio.TimeoutError:
                 body = None
                 timed_out = True
+            failed = body is None
             rows = (body or {}).get("data") if body else None
             if isinstance(rows, list):
                 results = [
@@ -430,7 +447,11 @@ async def search_grants_async(
                 cooldown,
             )
             return _stale_results("timed out")
-        return _stale_results("returned no results")
+        if failed:
+            return _stale_results("could not be reached")
+        # GrantedAI answered but had nothing for this search: show nothing rather
+        # than older results.
+        return []
 
     if client is not None:
         return await _run(client)

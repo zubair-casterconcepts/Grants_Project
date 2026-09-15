@@ -636,6 +636,16 @@ def parse_user_overrides(user_query: str) -> dict[str, Any]:
         overrides["keyword"] = keyword
         # Use the stated topic for scoring title when user gave one.
         overrides["title"] = keyword
+        if not overrides.get("priority_area"):
+            # "educational", "schools", "artistic" are not alias words, so the
+            # saved profile's focus area used to win and an education search came
+            # back full of arts grants. Read the focus area from the subject words
+            # the user typed; if they name none, the profile's stays.
+            from services.grant_categories import FALLBACK_CATEGORY, normalize_category
+
+            inferred = normalize_category(keyword)
+            if inferred and inferred != FALLBACK_CATEGORY:
+                overrides["priority_area"] = inferred
 
     return overrides
 

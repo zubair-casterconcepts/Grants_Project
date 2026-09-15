@@ -832,12 +832,47 @@
     });
   }
 
+  // "Grants you may also apply for": open to applicants in any state, so not tied
+  // to the searched place, but they passed every other check for this search.
+  const ALSO_SECTION_TITLE = "Grants you may also apply for";
+
+  function alsoSectionHtml(matches, location) {
+    const place = placeTextFrom(location || {}).replace(/^ for /, "");
+    const note = place
+      ? `Open to applicants in any state, so not specific to ${escapeHtml(place)} — but they match your search.`
+      : "Open to applicants in any state — they match your search.";
+    return (
+      `<div class="chat-also-head"><p class="chat-also-title">${ALSO_SECTION_TITLE}</p><p class="chat-also-note">${note}</p></div>` +
+      `<div class="chat-matches">${(matches || []).map((m, i) => renderCard(m, i)).join("")}</div>` +
+      matchToolbarHtml()
+    );
+  }
+
+  function bindResultsRow(el) {
+    if (!el) return;
+    bindSaveForms(el);
+    bindFeedbackButtons(el);
+    bindMatchToolbar(el);
+    showMatchToolbar(el);
+  }
+
   function replayMessage(message) {
     const role = message.role === "user" ? "user" : "assistant";
     const content = String(message.content || "");
     // Never replay transient system load errors into the thread.
     if (content.includes("I couldn't load that conversation")) return;
     const meta = message.metadata || {};
+    if (
+      role === "assistant" &&
+      meta.section === "also" &&
+      Array.isArray(meta.matches) &&
+      meta.matches.length
+    ) {
+      Promise.resolve(
+        appendAssistantHtml(alsoSectionHtml(meta.matches, meta.location), { persist: false })
+      ).then(bindResultsRow);
+      return;
+    }
     if (role === "assistant" && meta.type === "no_results") {
       Promise.resolve(
         appendAssistantHtml(emptyResultsHtml(meta.location, meta.screened_note || ""), {
@@ -1137,6 +1172,16 @@
   };
 
   const deadlineVerb = (source) => (source === "usaspending" ? "Ends" : "Closes");
+
+  // Extra badges for the other sources that listed the same opportunity.
+  const alsoListedPills = (match) =>
+    (Array.isArray(match.also_listed_on) ? match.also_listed_on : [])
+      .filter((source) => source && source !== match.source)
+      .map(
+        (source) =>
+          `<span class="source-pill source-${attr(source)} source-pill-also" title="Also listed on ${attr(sourceLabel(source))}">${escapeHtml(sourceLabel(source))}</span>`
+      )
+      .join("");
 
   const icons = {
     building: `<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4.5 20.5h15M7 20.5V6.8A1.3 1.3 0 0 1 8.3 5.5h7.4A1.3 1.3 0 0 1 17 6.8v13.7M10 9h1.2M10 12.5H11.2M13.8 9H15M13.8 12.5H15M10 16h4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>`,
@@ -1458,6 +1503,7 @@
             ${categoryHtml}
             <span class="chance-pill chance-${attr(tier)}">${escapeHtml(chanceLabel)}</span>
             <span class="source-pill source-${attr(match.source || "grants_gov")}">${escapeHtml(sourceLabel(match.source))}</span>
+            ${alsoListedPills(match)}
           </div>
           <div class="match-info">
             ${renderInfoRows(match)}
@@ -1493,6 +1539,14 @@
     if (chancePill) {
       chancePill.className = `chance-pill chance-${tier}`;
       chancePill.textContent = chanceLabel;
+    }
+
+    // Preview cards come from one source; the final list may credit more.
+    const sourcePill = card.querySelector(".source-pill:not(.source-pill-also)");
+    if (sourcePill) {
+      card.querySelectorAll(".source-pill-also").forEach((pill) => pill.remove());
+      const extra = alsoListedPills(match);
+      if (extra) sourcePill.insertAdjacentHTML("afterend", extra);
     }
 
     const category = String(match.category || "").trim();
@@ -2028,7 +2082,30 @@
       }
     };
 
-    const renderFinal = async (matches, location, savedCount, screenedNote) => {
+    // Nationwide programs that fit the search but not the place go in their own
+    // section below the results. It is drawn straight away with the results, then
+    // saved after them so a reload restores both in the same order.
+    const showAlsoSection = async (alsoMatches, location) => {
+      const rows = Array.isArray(alsoMatches) ? alsoMatches : [];
+      if (!rows.length) return [];
+      const alsoRow = await appendAssistantHtml(alsoSectionHtml(rows, location), {
+        persist: false,
+      });
+      bindResultsRow(alsoRow);
+      return rows;
+    };
+
+    const persistAlsoSection = async (rows, location) => {
+      if (!rows.length) return;
+      await persistMessage("assistant", ALSO_SECTION_TITLE, {
+        type: "matches",
+        section: "also",
+        matches: rows,
+        location: location || {},
+      });
+    };
+
+    const renderFinal = async (matches, location, savedCount, screenedNote, alsoMatches = []) => {
       const placeText = placeTextFrom(location);
       const finalMatches = Array.isArray(matches) ? matches : [];
       // The final list is authoritative. If eligibility screening removed
@@ -2048,11 +2125,13 @@
         });
         decorateEmptyResults(emptyRow);
         scrollToBottom({ force: true });
+        const alsoRows = await showAlsoSection(alsoMatches, location);
         await persistMessage("assistant", emptyResultsText(location, screenedNote), {
           type: "no_results",
           location: location || {},
           screened_note: screenedNote || "",
         });
+        await persistAlsoSection(alsoRows, location);
         return;
       }
       await ensureResultsShell(placeText);
@@ -2126,12 +2205,14 @@
       } else {
         restoreScrollAnchor(anchor);
       }
+      const alsoRows = await showAlsoSection(alsoMatches, location);
       await persistMessage("assistant", summary, {
         type: "matches",
         // Persist the final on-screen order (grouped by source, sorted within).
         matches: displayedMatches.length ? displayedMatches : finalMatches,
         location: location || {},
       });
+      await persistAlsoSection(alsoRows, location);
     };
 
     try {
@@ -2191,7 +2272,8 @@
             Array.isArray(event.matches) ? event.matches : [],
             event.location || {},
             event.saved_count,
-            event.screened_note || ""
+            event.screened_note || "",
+            Array.isArray(event.also_matches) ? event.also_matches : []
           );
           return;
         }
@@ -2214,7 +2296,8 @@
           Array.isArray(data.matches) ? data.matches : [],
           data.location || {},
           data.saved_count,
-          data.screened_note || ""
+          data.screened_note || "",
+          Array.isArray(data.also_matches) ? data.also_matches : []
         );
       }
 

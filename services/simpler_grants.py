@@ -45,8 +45,10 @@ MAX_ATTEMPTS = 3
 # The API rejects a longer `query`.
 QUERY_MAX_CHARS = 100
 
+# Last good results per search. Every search calls the API; these are only used
+# when that call fails, so a brief outage does not blank the source.
 _CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
-_CACHE_TTL_SECONDS = 300
+_FALLBACK_MAX_AGE_SECONDS = 3600
 _WARNED_NO_KEY = {"done": False}
 
 # Grants.gov funding-category codes (services/grants_gov.py) → Simpler enum values.
@@ -148,6 +150,17 @@ _TAG_RE = re.compile(r"<[^>]+>")
 
 def _api_key() -> str:
     return (os.getenv("SIMPLER_GRANTS_API_KEY") or "").strip()
+
+
+def _reuse_seconds() -> float:
+    """
+    How long an identical search may reuse earlier results instead of calling the
+    API. Default 0: every search asks Simpler.Grants.gov for current results.
+    """
+    try:
+        return max(0.0, float(os.getenv("SIMPLER_GRANTS_CACHE_SECONDS", "0")))
+    except ValueError:
+        return 0.0
 
 
 def _search_budget_seconds() -> float:
@@ -357,8 +370,9 @@ async def search_opportunities_async(
     cache_key = json.dumps(
         [bodies, subject.location_city.lower(), subject.location_state], sort_keys=True
     )
+    reuse_for = _reuse_seconds()
     cached = _CACHE.get(cache_key)
-    if cached and time.time() - cached[0] < _CACHE_TTL_SECONDS:
+    if reuse_for and cached and time.time() - cached[0] < reuse_for:
         return list(cached[1])
 
     async def _run(active: httpx.AsyncClient) -> list[dict[str, Any]] | None:
@@ -393,7 +407,7 @@ async def search_opportunities_async(
 
     if results is None:
         stale = _CACHE.get(cache_key)
-        if stale and time.time() - stale[0] < _CACHE_TTL_SECONDS * 12:
+        if stale and time.time() - stale[0] < _FALLBACK_MAX_AGE_SECONDS:
             logger.warning(
                 "Simpler.Grants.gov unavailable; serving results cached %.0f min ago",
                 (time.time() - stale[0]) / 60,

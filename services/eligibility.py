@@ -420,6 +420,12 @@ def _hide_nationwide() -> bool:
     return os.getenv("GRANT_HIDE_NATIONWIDE", "1").strip().lower() not in {"0", "false", "no", "off"}
 
 
+# Blocker text for a program hidden only because it is open nationwide instead
+# of tied to the searched place. Such programs are offered separately as
+# "Grants you may also apply for" (see grant_agent.recommendation_sections).
+NATIONWIDE_ONLY_BLOCKER = "nationwide program, not specific to"
+
+
 def _field_states(value: Any) -> tuple[set[str], bool]:
     """States in an explicit state field ("CA", "['CA', 'NV']", "Nationwide")."""
     text = _text(value)
@@ -459,7 +465,7 @@ def check_geography(row: dict[str, Any], state: str, city: str = "") -> Eligibil
     strict = _strict_location()
     hide_nationwide = _hide_nationwide()
     not_local = EligibilityVerdict(
-        INELIGIBLE, blockers=(f"nationwide program, not specific to {place}",)
+        INELIGIBLE, blockers=(f"{NATIONWIDE_ONLY_BLOCKER} {place}",)
     )
 
     # Explicit place of performance wins when the source provides it.
@@ -905,6 +911,11 @@ def filter_eligible(
         out["eligibility_reasons"] = "; ".join(verdict.reasons)
         if verdict.is_ineligible:
             out["eligibility_blockers"] = "; ".join(verdict.blockers)
+            # Every check passed except "tied to the searched place": the program
+            # is open nationwide (no state restriction).
+            out["nationwide_only"] = all(
+                blocker.startswith(NATIONWIDE_ONLY_BLOCKER) for blocker in verdict.blockers
+            )
             dropped.append(out)
             continue
         if verdict.status == UNVERIFIED and not keep_unverified:

@@ -1451,6 +1451,7 @@ def _dedupe_opportunities(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     then the one with published eligibility.
     """
     chosen: dict[tuple[str, str], dict[str, Any]] = {}
+    sources: dict[tuple[str, str], list[str]] = {}
     order: list[tuple[str, str]] = []
     for row in rows:
         title = re.sub(r"[^a-z0-9]+", " ", str(row.get("title") or "").lower()).strip()
@@ -1461,13 +1462,27 @@ def _dedupe_opportunities(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             key = (title, agency)
         else:
             key = (str(row.get("source") or ""), str(row.get("id") or row.get("number") or len(order)))
+        source = str(row.get("source") or "")
         current = chosen.get(key)
         if current is None:
             chosen[key] = row
+            sources[key] = [source]
             order.append(key)
-        elif _duplicate_rank(row) < _duplicate_rank(current):
+            continue
+        if source not in sources[key]:
+            sources[key].append(source)
+        if _duplicate_rank(row) < _duplicate_rank(current):
             chosen[key] = row
-    return [chosen[key] for key in order]
+
+    # The same federal opportunity often comes from both Grants.gov and
+    # Simpler.Grants.gov. One card is kept, but every source that listed it is
+    # recorded so the card can credit them all.
+    merged: list[dict[str, Any]] = []
+    for key in order:
+        row = chosen[key]
+        others = [src for src in sources[key] if src and src != row.get("source")]
+        merged.append({**row, "also_listed_on": others} if others else row)
+    return merged
 
 
 def _subject_terms(payload: dict[str, Any]) -> set[str]:
@@ -1524,21 +1539,70 @@ def _apply_subject_focus(row: dict[str, Any], terms: set[str]) -> dict[str, Any]
     return out
 
 
-def build_recommendations(
+def _score_rows(
+    rows: list[dict[str, Any]],
+    payload: dict[str, Any],
+    terms: set[str],
+    feedback: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """Score, focus-nudge and apply feedback; rows the user rejected are dropped."""
+    scored: list[dict[str, Any]] = []
+    for index, row in enumerate(rows):
+        graded = _score_grant_against_profile(row, payload, rank_index=index)
+        graded = _apply_subject_focus(graded, terms)
+        graded = _apply_feedback(graded, feedback)
+        if graded is not None:
+            scored.append(graded)
+    return scored
+
+
+def _about_searched_focus(row: dict[str, Any], payload: dict[str, Any]) -> bool:
+    """
+    Is this opportunity itself about what the user searched for?
+
+    Used for "Grants you may also apply for". The funding-category label alone
+    is not enough there: Grants.gov files NIH HIV and brain research under
+    "Education", which filled an education search with health research. The
+    grant's own title and description must point to the searched focus (or a
+    closely related one — a museum grant counts for Arts), or contain the words
+    the user typed.
+    """
+    from services.eligibility import _RELATED_CATEGORIES, subject_terms
+    from services.grant_categories import _keyword_hits, _normalize_text, normalize_category
+
+    wanted = normalize_category(payload.get("priority_area"))
+    if not wanted:
+        return True
+    text = _normalize_text(f"{row.get('title') or ''} {row.get('description') or ''}")
+    related = set(_RELATED_CATEGORIES.get(wanted, frozenset())) | {wanted}
+    if related & set(_keyword_hits(text)):
+        return True
+    typed = subject_terms(str((payload.get("overrides") or {}).get("keyword") or ""))
+    words = set(text.split())
+    return any(_mentions_term(words, term) for term in typed)
+
+
+def recommendation_sections(
     collected: dict[str, list[dict[str, Any]]],
     payload: dict[str, Any],
     *,
     limit: int = DEFAULT_CANDIDATE_LIMIT,
     feedback: dict[str, Any] | None = None,
-) -> tuple[list[dict[str, Any]], dict[str, int]]:
+) -> tuple[list[dict[str, Any]], dict[str, int], list[dict[str, Any]]]:
     """
-    Turn raw source rows into the final recommendation list.
+    The recommendation list plus "Grants you may also apply for".
 
     Order matters: drop stale, merge duplicates, hard-drop ineligible, then score
     what is left. Grant writers asked for eligibility to be settled *before*
     anything is recommended, so nothing ineligible can survive on a high score.
 
-    Returns (recommendations, stats) where stats explains what was filtered.
+    The second list holds opportunities that passed every check except the
+    location match because they are open nationwide (no state restriction). They
+    go through the same topic, eligibility, budget, deadline, feedback and
+    relevance checks, so they still fit what the user searched for — they are
+    just not specific to the place.
+
+    Returns (recommendations, stats, also_eligible).
     """
     raw: list[dict[str, Any]] = []
     for source in RECOMMENDATION_SOURCES:
@@ -1549,13 +1613,7 @@ def build_recommendations(
     eligible, dropped = filter_eligible(fresh, payload)
 
     terms = _subject_terms(payload)
-    scored: list[dict[str, Any]] = []
-    for index, row in enumerate(eligible):
-        graded = _score_grant_against_profile(row, payload, rank_index=index)
-        graded = _apply_subject_focus(graded, terms)
-        graded = _apply_feedback(graded, feedback)
-        if graded is not None:
-            scored.append(graded)
+    scored = _score_rows(eligible, payload, terms, feedback)
 
     floor = _relevance_floor()
     relevant = [row for row in scored if float(row.get("score") or 0.0) >= floor]
@@ -1565,6 +1623,20 @@ def build_recommendations(
     if not relevant and scored:
         relevant = _rank_by_chance(scored)[:limit]
 
+    # Nationwide programs are scored as if no place was asked for: not naming the
+    # searched state must not push them under the relevance floor.
+    nationwide = [
+        row
+        for row in dropped
+        if row.get("nationwide_only") and _about_searched_focus(row, payload)
+    ]
+    also_ranked: list[dict[str, Any]] = []
+    if nationwide:
+        placeless = {**payload, "location_state": "", "location_city": ""}
+        also_scored = _score_rows(nationwide, placeless, terms, feedback)
+        also_relevant = [row for row in also_scored if float(row.get("score") or 0.0) >= floor]
+        also_ranked = _attach_display_fields(_rank_grouped_by_source(also_relevant, limit=limit))
+
     stats = {
         "fetched": len(raw),
         "stale_dropped": len(raw) - len(actionable),
@@ -1572,8 +1644,28 @@ def build_recommendations(
         "ineligible_dropped": len(dropped),
         "below_relevance": max(0, len(scored) - len(relevant)),
         "suppressed_by_feedback": max(0, len(eligible) - len(scored)),
+        "nationwide_suggested": len(also_ranked),
     }
     ranked = _attach_display_fields(_rank_grouped_by_source(relevant, limit=limit))
+    return ranked, stats, also_ranked
+
+
+def build_recommendations(
+    collected: dict[str, list[dict[str, Any]]],
+    payload: dict[str, Any],
+    *,
+    limit: int = DEFAULT_CANDIDATE_LIMIT,
+    feedback: dict[str, Any] | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """
+    Turn raw source rows into the final recommendation list.
+
+    Returns (recommendations, stats) where stats explains what was filtered.
+    See recommendation_sections() for the pipeline and the nationwide list.
+    """
+    ranked, stats, _ = recommendation_sections(
+        collected, payload, limit=limit, feedback=feedback
+    )
     return ranked, stats
 
 
@@ -1669,7 +1761,9 @@ def _done_event(
     location: dict[str, str],
     *,
     stats: dict[str, int] | None = None,
+    also: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    also = also or []
     high = sum(1 for m in final if m.get("chance_tier") == "high")
     medium = sum(1 for m in final if m.get("chance_tier") == "medium")
     if final:
@@ -1685,8 +1779,13 @@ def _done_event(
     screened = 0
     note = ""
     if stats:
-        screened = int(stats.get("ineligible_dropped", 0)) + int(
-            stats.get("below_relevance", 0)
+        # Nationwide programs shown under "Grants you may also apply for" were
+        # not screened out, so they are not counted here.
+        screened = max(
+            0,
+            int(stats.get("ineligible_dropped", 0))
+            + int(stats.get("below_relevance", 0))
+            - len(also),
         )
         if screened:
             note = (
@@ -1703,6 +1802,8 @@ def _done_event(
         "stats": stats or {},
         "screened_out": screened,
         "screened_note": note,
+        "also_matches": also,
+        "also_count": len(also),
     }
 
 
@@ -1752,13 +1853,13 @@ async def _aiter_fallback_events(
             }
 
     # Freshness → eligibility → scoring, instantly and in that order.
-    final, stats = build_recommendations(
+    final, stats, also = recommendation_sections(
         collected,
         payload,
         limit=DEFAULT_CANDIDATE_LIMIT,
         feedback=payload.get("feedback"),
     )
-    yield _done_event(final, location, stats=stats)
+    yield _done_event(final, location, stats=stats, also=also)
 
 
 async def _aiter_agent_events(
@@ -1871,13 +1972,13 @@ async def _aiter_agent_events(
                 collected[src] = fetched.get(src, [])
 
     # Freshness → eligibility → scoring, instantly and in that order.
-    matches, stats = build_recommendations(
+    matches, stats, also = recommendation_sections(
         collected,
         payload,
         limit=DEFAULT_CANDIDATE_LIMIT,
         feedback=payload.get("feedback"),
     )
-    yield _done_event(matches, location, stats=stats)
+    yield _done_event(matches, location, stats=stats, also=also)
 
 
 async def aiter_grant_matching_events(
@@ -2024,11 +2125,14 @@ async def run_grant_matching_agent_async(
     *,
     max_results: int | None = None,
     feedback: dict[str, Any] | None = None,
-) -> list[dict[str, Any]]:
+    include_nationwide: bool = False,
+) -> Any:
     """
     Async matching: Agents SDK tools first, asyncio.gather fallback.
     Profile defaults apply unless user_query overrides specific fields.
     `max_results` caps the final ranked list (chat default 12; digests may raise it).
+    With `include_nationwide`, returns (matches, also_eligible) — the chat's
+    "Grants you may also apply for" list — instead of just the matches.
     """
     payload = _search_context(profile, user_query)
     limit = max(1, int(max_results or DEFAULT_RESULT_LIMIT))
@@ -2045,7 +2149,7 @@ async def run_grant_matching_agent_async(
         context=payload,
         result_limit=limit,
     )
-    matches, stats = build_recommendations(
+    matches, stats, also = recommendation_sections(
         sources,
         payload,
         limit=limit,
@@ -2057,6 +2161,8 @@ async def run_grant_matching_agent_async(
             stats["ineligible_dropped"],
             stats.get("fetched", 0),
         )
+    if include_nationwide:
+        return matches, also
     return matches
 
 
@@ -2066,7 +2172,8 @@ def run_grant_matching_agent(
     *,
     max_results: int | None = None,
     feedback: dict[str, Any] | None = None,
-) -> list[dict[str, Any]]:
+    include_nationwide: bool = False,
+) -> Any:
     """Sync bridge for /home/matches/ JSON endpoint and weekly digests."""
     return _run_async(
         run_grant_matching_agent_async(
@@ -2074,5 +2181,6 @@ def run_grant_matching_agent(
             user_query=user_query,
             max_results=max_results,
             feedback=feedback,
+            include_nationwide=include_nationwide,
         )
     )

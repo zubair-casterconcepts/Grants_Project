@@ -248,17 +248,20 @@ def matches_api_view(request):
 
     try:
         user_query = (request.GET.get("q") or "").strip()
-        matches = run_grant_matching_agent(
+        matches, also = run_grant_matching_agent(
             profile,
             user_query=user_query,
             feedback=feedback_signals(request.user),
+            include_nationwide=True,
         )
         prepared, saved_count = _prepare_matches(request.user, matches)
+        also_prepared, _ = _prepare_matches(request.user, also)
         ctx = resolve_search_context(profile, user_query=user_query)
         return JsonResponse(
             {
                 "matches": prepared,
                 "match_count": len(prepared),
+                "also_matches": also_prepared,
                 "saved_count": saved_count,
                 "location": {
                     "city": ctx.get("location_city") or "",
@@ -304,6 +307,12 @@ def matches_stream_api_view(request):
                     payload["matches"] = prepared
                     payload["saved_count"] = saved_count
                     payload["match_count"] = len(prepared)
+                if payload.get("also_matches"):
+                    # "Grants you may also apply for" cards need the same saved /
+                    # feedback state as the main results.
+                    payload["also_matches"], _ = _prepare_matches(
+                        request.user, payload["also_matches"]
+                    )
                 yield f"data: {json.dumps(payload)}\n\n"
         except Exception:
             fail = {

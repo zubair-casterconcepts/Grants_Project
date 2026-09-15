@@ -335,7 +335,8 @@ body {
 
 .match-card {
   display: grid;
-  grid-template-columns: auto 1fr;
+  /* minmax(0, …): long content wraps inside the card instead of widening it. */
+  grid-template-columns: auto minmax(0, 1fr);
   gap: 0.45rem 0.65rem;
   align-items: start;
   width: 100%;
@@ -591,8 +592,10 @@ body {
   align-items: center;
   gap: 0.25rem;
   max-width: 100%;
+  min-width: 0;
   padding: 0.12rem 0.4rem;
-  border-radius: 999px;
+  /* Rounded like a pill on one line, but still tidy when long text wraps. */
+  border-radius: 0.85rem;
   border: 1px solid var(--dash-line);
   background: #fafaf8;
   color: #5f5c55;
@@ -636,9 +639,10 @@ body {
 }
 
 .contact-chip span:last-child {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  min-width: 0;
+  /* Long contact lines (names, emails, street addresses) wrap inside the chip. */
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .info-value {
