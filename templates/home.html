@@ -8,8 +8,8 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=Manrope:wght@400;500;600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="{% static 'css/dashboard.css' %}">
-  <link rel="stylesheet" href="{% static 'css/chat.css' %}?v=20260914-feedback">
+  <link rel="stylesheet" href="{% static 'css/dashboard.css' %}?v=20260916-simpler">
+  <link rel="stylesheet" href="{% static 'css/chat.css' %}?v=20260915-thumbs">
 </head>
 <body class="dashboard-page chat-page">
   <div class="chat-layout">
@@ -186,7 +186,7 @@
   >
     <button type="button" class="chat-modal-backdrop" id="chat-feedback-backdrop" aria-label="Close dialog"></button>
     <form class="chat-modal-card chat-feedback-card" id="chat-feedback-form" novalidate data-no-loader="true">
-      <h2 class="chat-modal-title" id="chat-feedback-title">What makes this a good match?</h2>
+      <h2 class="chat-modal-title" id="chat-feedback-title">What made this a good response?</h2>
       <p class="chat-modal-copy" id="chat-feedback-copy">
         <strong id="chat-feedback-grant">This opportunity</strong>
       </p>
@@ -209,6 +209,6 @@
   {{ conversations_bootstrap|json_script:"conversations-bootstrap" }}
   {% include "partials/page_loader.html" %}
   <script src="{% static 'js/profile-menu.js' %}" defer></script>
-  <script src="{% static 'js/chat.js' %}?v=20260915-memory" defer></script>
+  <script src="{% static 'js/chat.js' %}?v=20260916-simpler" defer></script>
 </body>
 </html>

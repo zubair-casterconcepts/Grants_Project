@@ -678,7 +678,7 @@
     if (starterCopyEl) {
       starterCopyEl.textContent = onboarded
         ? `Tell me about ${projectTitle} and I'll find matching opportunities, help you refine details, and save the best fits.`
-        : "Answer a few quick questions about your organization and project, then I'll search Grants.gov and GrantedAI for opportunities you're eligible for.";
+        : "Answer a few quick questions about your organization and project, then I'll search Grants.gov, Simpler.Grants.gov and GrantedAI for opportunities you're eligible for.";
     }
 
     const cards = onboarded
@@ -774,12 +774,78 @@
     clearSuggestions();
   }
 
+  // ── "No grants found" card ────────────────────────────────────────────────
+  const EMPTY_ICON_SVG =
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="6.5"></circle><path d="m20 20-3.8-3.8"></path><path d="M8.5 11h5"></path></svg>';
+
+  function emptyResultsHtml(location, screenedNote) {
+    const place = location || {};
+    const placeText = placeTextFrom(place);
+    const state = String(place.state || "").trim();
+    const city = String(place.city || "").trim();
+    // Each label is sent as the user's message, so it must read as a request the
+    // parser understands: a state change, "…with my saved project" (clears chat
+    // memory) or "Update my project" (opens intake).
+    const actions = [];
+    if (city && state) actions.push(`Search all of ${state}`);
+    actions.push("Search with my saved project");
+    actions.push("Update my project");
+    const note = screenedNote
+      ? `<p class="chat-empty-note">${escapeHtml(screenedNote)}</p>`
+      : "";
+    const buttons = actions
+      .map(
+        (label) =>
+          `<button type="button" class="chat-empty-action" data-value="${attr(label)}">${escapeHtml(label)}</button>`
+      )
+      .join("");
+    return (
+      `<div class="chat-empty" role="status">` +
+      `<div class="chat-empty-icon" aria-hidden="true">${EMPTY_ICON_SVG}</div>` +
+      `<div class="chat-empty-body">` +
+      `<p class="chat-empty-title">No matching grants right now</p>` +
+      `<p class="chat-empty-text">I searched Grants.gov, Simpler.Grants.gov and GrantedAI${escapeHtml(placeText)}, but nothing open right now fits your eligibility, location and focus.</p>` +
+      note +
+      `<ul class="chat-empty-tips"><li>Try a broader topic or a nearby area.</li><li>Loosen the budget or organization type.</li><li>New grants are posted often, so check back soon.</li></ul>` +
+      `<div class="chat-empty-actions">${buttons}</div>` +
+      `</div></div>`
+    );
+  }
+
+  // Saved with the card so reloads, chat memory and the sidebar keep working.
+  function emptyResultsText(location, screenedNote) {
+    const placeText = placeTextFrom(location || {});
+    const screened = screenedNote ? ` ${screenedNote}` : "";
+    return `I couldn't find eligible opportunities for this search${placeText}.${screened} Try broadening the topic, or update your project details and search again.`;
+  }
+
+  function decorateEmptyResults(row) {
+    if (!row) return;
+    const bubble = row.querySelector(".chat-bubble");
+    if (bubble) bubble.classList.add("chat-bubble-empty");
+    row.querySelectorAll(".chat-empty-action").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        if (busy) return;
+        const label = btn.dataset.value || btn.textContent || "";
+        handleUserMessage(label, label);
+      });
+    });
+  }
+
   function replayMessage(message) {
     const role = message.role === "user" ? "user" : "assistant";
     const content = String(message.content || "");
     // Never replay transient system load errors into the thread.
     if (content.includes("I couldn't load that conversation")) return;
     const meta = message.metadata || {};
+    if (role === "assistant" && meta.type === "no_results") {
+      Promise.resolve(
+        appendAssistantHtml(emptyResultsHtml(meta.location, meta.screened_note || ""), {
+          persist: false,
+        })
+      ).then(decorateEmptyResults);
+      return;
+    }
     if (role === "assistant" && Array.isArray(meta.matches) && meta.matches.length) {
       const summary =
         message.content ||
@@ -1066,6 +1132,7 @@
   const sourceLabel = (source) => {
     if (source === "usaspending") return "USASpending";
     if (source === "granted_ai") return "GrantedAI";
+    if (source === "simpler_grants") return "Simpler.Grants.gov";
     return "Grants.gov";
   };
 
@@ -1318,50 +1385,46 @@
     return { score, chance, tier, chanceLabel };
   }
 
-  // Eligible / Not-eligible marks. These teach the matcher: a "Not eligible"
-  // hides that opportunity next time and down-ranks funders the user keeps
-  // rejecting, which is what grant writers asked for.
+  // ChatGPT-style Good response / Bad response. They teach the matcher exactly
+  // as before: "Good response" is saved as a good match; "Bad response" as not a
+  // fit, which hides that opportunity next time and down-ranks funders the user
+  // keeps rejecting. Verdicts saved earlier as "Not eligible" show as Bad response.
+  const THUMB_UP_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 10v12"/><path d="M15 5.88 14 10h5.83a2 2 0 0 1 1.92 2.56l-2.33 8A2 2 0 0 1 17.5 22H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h2.76a2 2 0 0 0 1.79-1.11L12 2a3.13 3.13 0 0 1 3 3.88Z"/></svg>`;
+  const THUMB_DOWN_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 14V2"/><path d="M9 18.12 10 14H4.17a2 2 0 0 1-1.92-2.56l2.33-8A2 2 0 0 1 6.5 2H20a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-2.76a2 2 0 0 0-1.79 1.11L12 22a3.13 3.13 0 0 1-3-3.88Z"/></svg>`;
   const FEEDBACK_OPTIONS = [
-    {
-      verdict: "good_match",
-      label: "Good match",
-      title: "Eligible and relevant — show me more like this",
-      icon: `<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m5 12.5 4.2 4.2L19 7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
-    },
-    {
-      verdict: "not_eligible",
-      label: "Not eligible",
-      title: "We can't apply for this — stop showing it",
-      icon: `<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="8" stroke="currentColor" stroke-width="1.9"/><path d="m8.6 8.6 6.8 6.8" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg>`,
-    },
-    {
-      verdict: "irrelevant",
-      label: "Not relevant",
-      title: "Eligible, but not the kind of work we do",
-      icon: `<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>`,
-    },
+    { verdict: "good_match", label: "Good response", icon: THUMB_UP_ICON },
+    { verdict: "irrelevant", label: "Bad response", icon: THUMB_DOWN_ICON },
   ];
+  const NEGATIVE_VERDICTS = ["not_eligible", "irrelevant"];
+
+  // The button a saved verdict lights up.
+  function feedbackButtonVerdict(verdict) {
+    return NEGATIVE_VERDICTS.includes(verdict) ? "irrelevant" : verdict;
+  }
 
   function renderFeedbackControls(match) {
-    const current = String(match.user_feedback || "");
+    const current = feedbackButtonVerdict(String(match.user_feedback || ""));
     const buttons = FEEDBACK_OPTIONS.map((option) => {
-      const active = current === option.verdict ? " is-active" : "";
+      const on = current === option.verdict;
       return `
         <button
           type="button"
-          class="feedback-btn feedback-${attr(option.verdict)}${active}"
+          class="feedback-btn feedback-${attr(option.verdict)}${on ? " is-active" : ""}"
           data-verdict="${attr(option.verdict)}"
-          title="${attr(option.title)}"
-          aria-pressed="${current === option.verdict ? "true" : "false"}"
+          title="${attr(option.label)}"
+          aria-label="${attr(option.label)}"
+          aria-pressed="${on ? "true" : "false"}"
         >
           <span class="feedback-btn-icon" aria-hidden="true">${option.icon}</span>
-          <span>${escapeHtml(option.label)}</span>
+          <span class="feedback-btn-label">${escapeHtml(option.label)}</span>
         </button>
       `;
     }).join("");
     return `
       <div
         class="match-feedback"
+        role="group"
+        aria-label="Rate this result"
         data-feedback-for="${attr(matchKey(match))}"
         data-source="${attr(match.source || "")}"
         data-external-id="${attr(match.save_external_id || match.id || match.number || match.url || match.title || "")}"
@@ -1370,7 +1433,6 @@
         data-category="${attr(match.category || "")}"
         data-pop-state="${attr(match.pop_state || match.state || "")}"
       >
-        <span class="match-feedback-label">Is this a fit?</span>
         ${buttons}
       </div>
     `;
@@ -1475,21 +1537,17 @@
   }
 
   // Delegated so cards added later (streaming, reorder) stay wired up.
-  // Reason popup for Good match / Not eligible / Not relevant. The weekly
+  // Reason popup for Good response / Bad response. The weekly
   // agent-instruction update learns from these reasons, so a verdict is only
   // saved together with one.
   const FEEDBACK_PROMPTS = {
     good_match: {
-      title: "What makes this a good match?",
+      title: "What made this a good response?",
       placeholder: "e.g. We're a Michigan nonprofit and this funds after-school literacy programs.",
     },
-    not_eligible: {
-      title: "Why aren't you eligible?",
-      placeholder: "e.g. Only school districts can apply, and we're a community foundation.",
-    },
     irrelevant: {
-      title: "Why isn't this relevant?",
-      placeholder: "e.g. It funds research, not direct services for families.",
+      title: "What was wrong with this response?",
+      placeholder: "e.g. Only school districts can apply, or it funds research, not direct services.",
     },
   };
   const FEEDBACK_REASON_MIN = 3;
@@ -1628,7 +1686,7 @@
 
   function showFeedbackState(card, group, applied) {
     group.querySelectorAll(".feedback-btn").forEach((btn) => {
-      const on = btn.dataset.verdict === applied;
+      const on = btn.dataset.verdict === feedbackButtonVerdict(applied);
       btn.classList.toggle("is-active", on);
       btn.setAttribute("aria-pressed", on ? "true" : "false");
     });
@@ -1977,14 +2035,24 @@
       // everything, clear any preview cards too — never leave unscreened cards
       // on screen under an "eligible opportunities" heading.
       if (!finalMatches.length) {
-        const emptyAnchor = captureScrollAnchor();
+        // Replace the loader with a clear "no grants" card the moment the
+        // search finishes, with one-click next steps.
         if (resultsRow) removeNode(resultsRow);
-        const screened = screenedNote ? ` ${screenedNote}` : "";
-        const emptyMsg = `I couldn't find eligible opportunities for this search${placeText}.${screened} Try broadening the topic, or update your project details and search again.`;
-        await setStatus(emptyMsg);
-        restoreScrollAnchor(emptyAnchor);
-        await persistMessage("assistant", emptyMsg);
-        if (stickToBottom) scrollToBottom();
+        resultsRow = null;
+        clearThinkingStatus();
+        if (statusRow) removeNode(statusRow);
+        statusRow = null;
+        statusBubble = null;
+        const emptyRow = await appendAssistantHtml(emptyResultsHtml(location, screenedNote), {
+          persist: false,
+        });
+        decorateEmptyResults(emptyRow);
+        scrollToBottom({ force: true });
+        await persistMessage("assistant", emptyResultsText(location, screenedNote), {
+          type: "no_results",
+          location: location || {},
+          screened_note: screenedNote || "",
+        });
         return;
       }
       await ensureResultsShell(placeText);
@@ -2039,7 +2107,7 @@
 
       const total = displayedMatches.length || finalMatches.length;
       const noun = total === 1 ? "opportunity" : "opportunities";
-      const summary = `Here are ${total} eligible ${noun} from Grants.gov and GrantedAI${placeText}.`;
+      const summary = `Here are ${total} eligible ${noun} from Grants.gov, Simpler.Grants.gov and GrantedAI${placeText}.`;
       if (summaryEl) summaryEl.textContent = summary;
       // Say what was screened out, so a short list reads as "we filtered the
       // noise" rather than "the search found almost nothing".
@@ -2069,9 +2137,6 @@
     try {
       const streamUrl = new URL(matchesStreamUrl, window.location.origin);
       if (queryText) streamUrl.searchParams.set("q", queryText);
-      // Lets the server remember earlier requests in this chat, so a follow-up
-      // like "what about Texas?" keeps the topic and budget already given.
-      if (conversationId) streamUrl.searchParams.set("conversation", String(conversationId));
       const response = await fetch(streamUrl.toString(), {
         headers: { Accept: "text/event-stream" },
         credentials: "same-origin",
@@ -2139,7 +2204,6 @@
         // Fallback if stream ended without a done event.
         const fallbackUrl = new URL(matchesUrl, window.location.origin);
         if (queryText) fallbackUrl.searchParams.set("q", queryText);
-        if (conversationId) fallbackUrl.searchParams.set("conversation", String(conversationId));
         const fallback = await fetch(fallbackUrl.toString(), {
           headers: { Accept: "application/json" },
           credentials: "same-origin",
@@ -2183,7 +2247,7 @@
       removeNode(typing);
       appendText(
         "assistant",
-        "Thanks — your project profile is ready. I'll search Grants.gov and GrantedAI now, and only show opportunities you're eligible for."
+        "Thanks — your project profile is ready. I'll search Grants.gov, Simpler.Grants.gov and GrantedAI now, and only show opportunities you're eligible for."
       );
       await loadMatches();
     } catch (err) {

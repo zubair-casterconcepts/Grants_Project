@@ -532,6 +532,12 @@ body {
   background: #faf6ef;
 }
 
+.source-simpler_grants {
+  color: #5a4f82;
+  border-color: #dedaf0;
+  background: #f6f5fb;
+}
+
 .match-info {
   display: grid;
   gap: 0.22rem;

@@ -43,7 +43,9 @@ def _env_seconds(name: str, default: float) -> float:
 
 
 def _search_budget_seconds() -> float:
-    return _env_seconds("GRANTED_AI_TIMEOUT_SECONDS", 30)
+    # Healthy GrantedAI answers took 9–18s; 15s keeps a search (or its "no grants"
+    # message) from waiting long on an outage. GRANTED_AI_TIMEOUT_SECONDS overrides.
+    return _env_seconds("GRANTED_AI_TIMEOUT_SECONDS", 15)
 
 
 def _cooldown_seconds() -> float:

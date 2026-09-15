@@ -125,7 +125,7 @@ def load_agent_instructions() -> str:
 
 
 class GrantMatch(BaseModel):
-    source: str = Field(description="grants_gov, usaspending, or granted_ai")
+    source: str = Field(description="grants_gov, usaspending, granted_ai, or simpler_grants")
     title: str
     agency: str = ""
     agency_code: str = ""
@@ -225,9 +225,16 @@ def _iter_async_generator(agen: AsyncIterator[T]) -> Iterator[T]:
 
 
 def _agent_enabled() -> bool:
-    """Agents SDK is on by default when an API key exists; set GRANT_USE_AGENT=0 to disable."""
-    flag = os.getenv("GRANT_USE_AGENT", "1").strip().lower()
-    if flag in {"0", "false", "no", "off"}:
+    """
+    Whether chat searches go through the Agents SDK.
+
+    Off by default: the agent's planning call took 5–9s before any source was
+    searched, while the direct path searches every source in parallel straight
+    away with the same filters, eligibility gate and ranking (~4s end to end).
+    GRANT_USE_AGENT=1 turns the agent back on (it also needs OPENAI_API_KEY).
+    """
+    flag = os.getenv("GRANT_USE_AGENT", "0").strip().lower()
+    if flag not in {"1", "true", "yes", "on"}:
         return False
     return bool(os.getenv("OPENAI_API_KEY", "").strip())
 
@@ -241,29 +248,7 @@ def _prompt_context(payload: dict[str, Any]) -> dict[str, Any]:
     raised TypeError, silently pushing every user who had ever clicked a
     feedback button off the agent path and onto the fallback.
     """
-    return {
-        key: value
-        for key, value in payload.items()
-        if key not in ("feedback", "conversation_history")
-    }
-
-
-def _history_block(payload: dict[str, Any]) -> str:
-    """Earlier requests in this chat, so the agent reads a follow-up in context."""
-    history = [
-        str(text).strip()
-        for text in payload.get("conversation_history") or []
-        if str(text).strip()
-    ]
-    if not history:
-        return ""
-    lines = "\n".join(f"- {text[:300]}" for text in history[-8:])
-    return (
-        "EARLIER_REQUESTS_IN_THIS_CONVERSATION (oldest first). The latest message is a "
-        "follow-up to these; SEARCH_CONTEXT_JSON already carries forward whatever it "
-        "did not change:\n"
-        f"{lines}\n\n"
-    )
+    return {key: value for key, value in payload.items() if key != "feedback"}
 
 
 def _matching_prompt(payload: dict[str, Any], user_query: str = "") -> str:
@@ -272,14 +257,13 @@ def _matching_prompt(payload: dict[str, Any], user_query: str = "") -> str:
         "DEFAULTS come from the saved user profile. "
         "OVERRIDES come from the latest user message — use overrides when present, "
         "otherwise keep profile defaults for that field. "
-        "Call grants_gov and granted_ai in the SAME turn so they can "
+        "Call grants_gov, granted_ai and simpler_grants in the SAME turn so they can "
         "run concurrently. You may omit tool args to use baked-in defaults, or pass "
         "overrides explicitly. "
         "Only keep opportunities the user is actually eligible for — matching "
         "applicant type, not restricted to another state, and still open. "
         "Preserve agency name, agency_address, and other provider fields. "
         "Set chance_percent to round(score * 100).\n\n"
-        f"{_history_block(payload)}"
         f"USER_QUERY:\n{(user_query or '').strip() or '(none — use all profile defaults)'}\n\n"
         f"SEARCH_CONTEXT_JSON:\n{json.dumps(_prompt_context(payload), indent=2, default=str)}"
     )
@@ -322,13 +306,9 @@ def _profile_payload(profile: Any) -> dict[str, Any]:
     return profile_defaults(profile)
 
 
-def _search_context(
-    profile: Any,
-    user_query: str = "",
-    history: list[str] | None = None,
-) -> dict[str, Any]:
-    """Profile defaults + conversation memory + latest user-query overrides."""
-    return resolve_search_context(profile, user_query=user_query or "", history=history)
+def _search_context(profile: Any, user_query: str = "") -> dict[str, Any]:
+    """Profile defaults + latest user-query overrides for tools/scoring."""
+    return resolve_search_context(profile, user_query=user_query or "")
 
 
 def _compact(items: list[dict[str, Any]], source: str) -> list[dict[str, Any]]:
@@ -898,7 +878,7 @@ DEFAULT_CANDIDATE_LIMIT = 18
 # money already paid to a named recipient — which grant writers reported as the
 # main source of "long shots that turn out ineligible". Its client is kept for
 # funding-intelligence use, just never as an opportunity. See services/eligibility.py.
-RECOMMENDATION_SOURCES = ("grants_gov", "granted_ai")
+RECOMMENDATION_SOURCES = ("grants_gov", "granted_ai", "simpler_grants")
 
 # Sources are shown grouped in this order, each section sorted on its own.
 _SOURCE_DISPLAY_ORDER = RECOMMENDATION_SOURCES
@@ -1248,6 +1228,7 @@ def _source_coroutines(
     """Build async source fetchers (native async HTTP clients)."""
     from services.granted_ai import search_grants_async
     from services.grants_gov import search_with_filters_async
+    from services.simpler_grants import search_opportunities_async
     from services.usaspending import search_awards_async
 
     payload = context or _search_context(profile, user_query)
@@ -1305,12 +1286,27 @@ def _source_coroutines(
             logger.warning("granted_ai fallback fetch failed", exc_info=True)
             return []
 
+    async def _simpler() -> list[dict[str, Any]]:
+        try:
+            results = await search_opportunities_async(
+                keyword=keyword,
+                priority_area=priority,
+                location_city=city,
+                location_state=state,
+                rows=gov_rows,
+            )
+            return _compact(results, "simpler_grants")
+        except Exception:
+            logger.warning("simpler_grants fallback fetch failed", exc_info=True)
+            return []
+
     # Only recommendation sources are fetched. Skipping USASpending also removes
     # the slowest upstream call, so search returns sooner.
     available = {
         "grants_gov": _gov,
         "usaspending": _usa,
         "granted_ai": _granted,
+        "simpler_grants": _simpler,
     }
     return {name: available[name] for name in RECOMMENDATION_SOURCES}
 
@@ -1342,6 +1338,7 @@ async def fetch_all_sources_async(
         "grants_gov": [],
         "usaspending": [],
         "granted_ai": [],
+        "simpler_grants": [],
     }
     for name, result in zip(names, results):
         if isinstance(result, Exception):
@@ -1584,6 +1581,7 @@ _SOURCE_LABELS = {
     "grants_gov": "Grants.gov",
     "usaspending": "USASpending",
     "granted_ai": "GrantedAI",
+    "simpler_grants": "Simpler.Grants.gov",
 }
 
 
@@ -1642,12 +1640,12 @@ def _initial_status_event(payload: dict[str, Any], *, agent: bool) -> dict[str, 
     overrides = payload.get("overrides") or {}
     if agent:
         message = (
-            "Searching Grants.gov and GrantedAI and screening for eligibility…"
+            "Searching Grants.gov, Simpler.Grants.gov and GrantedAI and screening for eligibility…"
             + _status_override_note(payload)
         )
     else:
         message = (
-            "Searching Grants.gov and GrantedAI and screening for eligibility…"
+            "Searching Grants.gov, Simpler.Grants.gov and GrantedAI and screening for eligibility…"
             + _status_override_note(payload)
         )
     return {
@@ -1887,7 +1885,6 @@ async def aiter_grant_matching_events(
     user_query: str = "",
     *,
     feedback: dict[str, Any] | None = None,
-    history: list[str] | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     """
     Async progressive match events for SSE.
@@ -1895,14 +1892,10 @@ async def aiter_grant_matching_events(
 
     `feedback` carries the user's past Eligible / Not-eligible verdicts so
     rejected opportunities are suppressed and rejected funders rank lower.
-    `history` is the earlier search requests in this conversation (oldest
-    first), so a follow-up keeps what it doesn't restate.
     """
-    payload = _search_context(profile, user_query, history)
+    payload = _search_context(profile, user_query)
     if feedback:
         payload["feedback"] = feedback
-    if history:
-        payload["conversation_history"] = list(history)
     if _agent_enabled():
         try:
             async for event in _aiter_agent_events(profile, user_query, payload):
@@ -1922,12 +1915,11 @@ def iter_grant_matching_events(
     user_query: str = "",
     *,
     feedback: dict[str, Any] | None = None,
-    history: list[str] | None = None,
 ) -> Iterator[dict[str, Any]]:
     """Sync bridge for Django StreamingHttpResponse SSE."""
     yield from _iter_async_generator(
         aiter_grant_matching_events(
-            profile, user_query=user_query, feedback=feedback, history=history
+            profile, user_query=user_query, feedback=feedback
         )
     )
 
@@ -2004,7 +1996,11 @@ def build_grant_agent(defaults: dict[str, Any] | None = None):
     """
     from agents import Agent
 
-    from services.tools import build_granted_ai_tool, build_grants_gov_tool
+    from services.tools import (
+        build_granted_ai_tool,
+        build_grants_gov_tool,
+        build_simpler_grants_tool,
+    )
 
     # Only recommendation sources are registered — USASpending returns awards
     # already paid out, which must never be offered as something to apply for.
@@ -2015,6 +2011,7 @@ def build_grant_agent(defaults: dict[str, Any] | None = None):
         tools=[
             build_grants_gov_tool(tool_defaults),
             build_granted_ai_tool(tool_defaults),
+            build_simpler_grants_tool(tool_defaults),
         ],
         output_type=GrantMatchResult,
         model=os.getenv("OPENAI_MODEL", "gpt-5.5"),
@@ -2027,15 +2024,13 @@ async def run_grant_matching_agent_async(
     *,
     max_results: int | None = None,
     feedback: dict[str, Any] | None = None,
-    history: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """
     Async matching: Agents SDK tools first, asyncio.gather fallback.
     Profile defaults apply unless user_query overrides specific fields.
     `max_results` caps the final ranked list (chat default 12; digests may raise it).
-    `history` is the earlier search requests in the same conversation.
     """
-    payload = _search_context(profile, user_query, history)
+    payload = _search_context(profile, user_query)
     limit = max(1, int(max_results or DEFAULT_RESULT_LIMIT))
     if feedback is not None:
         payload["feedback"] = feedback
@@ -2071,7 +2066,6 @@ def run_grant_matching_agent(
     *,
     max_results: int | None = None,
     feedback: dict[str, Any] | None = None,
-    history: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Sync bridge for /home/matches/ JSON endpoint and weekly digests."""
     return _run_async(
@@ -2080,6 +2074,5 @@ def run_grant_matching_agent(
             user_query=user_query,
             max_results=max_results,
             feedback=feedback,
-            history=history,
         )
     )

@@ -33,6 +33,7 @@ SOURCE_LABELS = {
     "grants_gov": "Grants.gov",
     "usaspending": "USASpending",
     "granted_ai": "GrantedAI",
+    "simpler_grants": "Simpler.Grants.gov",
 }
 
 ORG_TYPE_LABELS = {

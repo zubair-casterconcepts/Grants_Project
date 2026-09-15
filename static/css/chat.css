@@ -568,6 +568,146 @@ body.chat-sidebar-collapsed .chat-sidebar-toggle {
   box-shadow: none;
 }
 
+/* "No grants found" card */
+.chat-row.is-assistant .chat-bubble.chat-bubble-empty {
+  max-width: min(100%, 40rem);
+  padding: 1.15rem 1.25rem;
+  white-space: normal;
+  border-radius: 18px;
+  border-bottom-left-radius: 6px;
+  background: linear-gradient(180deg, #ffffff 0%, #fbfaf7 100%);
+}
+
+.chat-empty {
+  display: flex;
+  gap: 0.95rem;
+  align-items: flex-start;
+}
+
+.chat-empty-icon {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 2.6rem;
+  height: 2.6rem;
+  border-radius: 50%;
+  background: var(--chat-icon-bg);
+  border: 1px solid var(--chat-line);
+  color: var(--chat-green);
+}
+
+.chat-empty-icon svg {
+  width: 1.3rem;
+  height: 1.3rem;
+}
+
+.chat-empty-body {
+  min-width: 0;
+}
+
+.chat-empty-title {
+  margin: 0.1rem 0 0.3rem;
+  font-family: var(--font-display);
+  font-size: 1.12rem;
+  font-weight: 600;
+  line-height: 1.3;
+  color: var(--chat-ink);
+}
+
+.chat-empty-text {
+  margin: 0;
+  color: var(--chat-ink);
+  line-height: 1.55;
+}
+
+.chat-empty-note {
+  margin: 0.55rem 0 0;
+  font-size: 0.88rem;
+  color: var(--chat-muted);
+}
+
+.chat-empty-tips {
+  margin: 0.7rem 0 0;
+  padding-left: 1.1rem;
+  font-size: 0.92rem;
+  color: var(--chat-muted);
+}
+
+.chat-empty-tips li + li {
+  margin-top: 0.2rem;
+}
+
+.chat-empty-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.9rem;
+}
+
+.chat-empty-action {
+  appearance: none;
+  border: 1px solid var(--chat-line);
+  background: #fff;
+  color: var(--chat-green);
+  font: inherit;
+  font-size: 0.9rem;
+  font-weight: 600;
+  padding: 0.42rem 0.85rem;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background 160ms ease, border-color 160ms ease, color 160ms ease;
+}
+
+.chat-empty-action:hover,
+.chat-empty-action:focus-visible {
+  background: var(--chat-green);
+  border-color: var(--chat-green);
+  color: #fff;
+  outline: none;
+}
+
+.chat-empty-action:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+/* Good response / Bad response (thumbs) on match cards */
+.match-feedback {
+  gap: 0.35rem;
+}
+
+.match-feedback .feedback-btn {
+  gap: 0.35rem;
+  padding: 0.3rem 0.72rem 0.3rem 0.6rem;
+  color: var(--chat-muted);
+}
+
+.match-feedback .feedback-btn:hover {
+  color: var(--chat-ink);
+}
+
+.match-feedback .feedback-btn-icon {
+  width: 0.95rem;
+  height: 0.95rem;
+}
+
+.match-feedback .feedback-btn.is-active .feedback-btn-icon svg path:last-child {
+  fill: currentColor;
+  fill-opacity: 0.2;
+}
+
+.match-feedback .feedback-btn.feedback-good_match.is-active {
+  background: #eef5f1;
+  border-color: #b9d0c4;
+  color: #2d5046;
+}
+
+.match-feedback .feedback-btn.feedback-irrelevant.is-active {
+  background: rgba(196, 91, 74, 0.08);
+  border-color: rgba(196, 91, 74, 0.35);
+  color: #9a3f2f;
+}
+
 /* Claude-style faded thinking dropdown */
 .chat-row.is-assistant .chat-bubble.chat-status-calling {
   background: transparent;
