@@ -2,6 +2,7 @@
 
 from services.tools.granted_ai_tool import build_granted_ai_tool
 from services.tools.grants_gov_tool import build_grants_gov_tool
+from services.tools.opengrants_tool import build_opengrants_tool
 from services.tools.simpler_grants_tool import build_simpler_grants_tool
 from services.tools.usaspending_tool import build_usaspending_tool
 
@@ -10,4 +11,5 @@ __all__ = (
     "build_usaspending_tool",
     "build_granted_ai_tool",
     "build_simpler_grants_tool",
+    "build_opengrants_tool",
 )

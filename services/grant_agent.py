@@ -26,6 +26,7 @@ from typing import Any, Awaitable, Callable, TypeVar
 
 from pydantic import BaseModel, Field
 
+from services import source_health
 from services.async_utils import run_sync
 from services.eligibility import filter_eligible
 from services.location_utils import US_STATE_NAMES
@@ -125,7 +126,7 @@ def load_agent_instructions() -> str:
 
 
 class GrantMatch(BaseModel):
-    source: str = Field(description="grants_gov, usaspending, granted_ai, or simpler_grants")
+    source: str = Field(description="opengrants, grants_gov, usaspending, granted_ai, or simpler_grants")
     title: str
     agency: str = ""
     agency_code: str = ""
@@ -257,7 +258,7 @@ def _matching_prompt(payload: dict[str, Any], user_query: str = "") -> str:
         "DEFAULTS come from the saved user profile. "
         "OVERRIDES come from the latest user message — use overrides when present, "
         "otherwise keep profile defaults for that field. "
-        "Call grants_gov, granted_ai and simpler_grants in the SAME turn so they can "
+        "Call opengrants, grants_gov, granted_ai and simpler_grants in the SAME turn so they can "
         "run concurrently. You may omit tool args to use baked-in defaults, or pass "
         "overrides explicitly. "
         "Only keep opportunities the user is actually eligible for — matching "
@@ -878,7 +879,9 @@ DEFAULT_CANDIDATE_LIMIT = 18
 # money already paid to a named recipient — which grant writers reported as the
 # main source of "long shots that turn out ineligible". Its client is kept for
 # funding-intelligence use, just never as an opportunity. See services/eligibility.py.
-RECOMMENDATION_SOURCES = ("grants_gov", "granted_ai", "simpler_grants")
+# OpenGrants is listed first: its section is shown first, and when the same grant
+# also comes from another source the OpenGrants copy is the one kept.
+RECOMMENDATION_SOURCES = ("opengrants", "grants_gov", "granted_ai", "simpler_grants")
 
 # Sources are shown grouped in this order, each section sorted on its own.
 _SOURCE_DISPLAY_ORDER = RECOMMENDATION_SOURCES
@@ -1228,6 +1231,7 @@ def _source_coroutines(
     """Build async source fetchers (native async HTTP clients)."""
     from services.granted_ai import search_grants_async
     from services.grants_gov import search_with_filters_async
+    from services.opengrants import search_opportunities_async as search_opengrants_async
     from services.simpler_grants import search_opportunities_async
     from services.usaspending import search_awards_async
 
@@ -1255,6 +1259,7 @@ def _source_coroutines(
             return _compact(results, "grants_gov")
         except Exception:
             logger.warning("grants_gov fallback fetch failed", exc_info=True)
+            source_health.report("grants_gov", source_health.UNAVAILABLE)
             return []
 
     async def _usa() -> list[dict[str, Any]]:
@@ -1284,6 +1289,7 @@ def _source_coroutines(
             return _compact(results, "granted_ai")
         except Exception:
             logger.warning("granted_ai fallback fetch failed", exc_info=True)
+            source_health.report("granted_ai", source_health.UNAVAILABLE)
             return []
 
     async def _simpler() -> list[dict[str, Any]]:
@@ -1298,11 +1304,27 @@ def _source_coroutines(
             return _compact(results, "simpler_grants")
         except Exception:
             logger.warning("simpler_grants fallback fetch failed", exc_info=True)
+            source_health.report("simpler_grants", source_health.UNAVAILABLE)
+            return []
+
+    async def _opengrants() -> list[dict[str, Any]]:
+        try:
+            results = await search_opengrants_async(
+                keyword=keyword,
+                priority_area=priority,
+                location_city=city,
+                location_state=state,
+            )
+            return _compact(results, "opengrants")
+        except Exception:
+            logger.warning("opengrants fallback fetch failed", exc_info=True)
+            source_health.report("opengrants", source_health.UNAVAILABLE)
             return []
 
     # Only recommendation sources are fetched. Skipping USASpending also removes
     # the slowest upstream call, so search returns sooner.
     available = {
+        "opengrants": _opengrants,
         "grants_gov": _gov,
         "usaspending": _usa,
         "granted_ai": _granted,
@@ -1335,6 +1357,7 @@ async def fetch_all_sources_async(
         return_exceptions=True,
     )
     out: dict[str, list[dict[str, Any]]] = {
+        "opengrants": [],
         "grants_gov": [],
         "usaspending": [],
         "granted_ai": [],
@@ -1674,7 +1697,79 @@ _SOURCE_LABELS = {
     "usaspending": "USASpending",
     "granted_ai": "GrantedAI",
     "simpler_grants": "Simpler.Grants.gov",
+    "opengrants": "OpenGrants",
 }
+
+
+def _source_max_seconds() -> float:
+    """
+    Longest one search waits for any single source (GRANT_SOURCE_MAX_SECONDS,
+    default 45). Each client has its own shorter limit; this is the safety net
+    so one stuck source can never hold back results from the others.
+    """
+    try:
+        return max(5.0, float(os.getenv("GRANT_SOURCE_MAX_SECONDS", "45")))
+    except ValueError:
+        return 45.0
+
+
+def _join_labels(labels: list[str]) -> str:
+    if len(labels) <= 1:
+        return "".join(labels)
+    return ", ".join(labels[:-1]) + " and " + labels[-1]
+
+
+def _source_notices(
+    outcomes: dict[str, str],
+    collected: dict[str, list[dict[str, Any]]],
+) -> list[dict[str, str]]:
+    """Sources that failed this search and gave no rows (served saved results count as answered)."""
+    notices: list[dict[str, str]] = []
+    for source in RECOMMENDATION_SOURCES:
+        reason = source_health.failure_reason(outcomes, source)
+        if not reason or collected.get(source):
+            continue
+        label = _SOURCE_LABELS.get(source, source)
+        reason_text = source_health.REASON_TEXT.get(reason, source_health.REASON_TEXT["unavailable"])
+        notices.append(
+            {
+                "source": source,
+                "label": label,
+                "reason": reason,
+                "reason_text": reason_text,
+                "message": f"{label} is unavailable right now ({reason_text}).",
+            }
+        )
+    return notices
+
+
+def _source_event_message(label: str, count: int, reason: str | None) -> str:
+    if count:
+        return f"Found {count} from {label}."
+    if reason:
+        reason_text = source_health.REASON_TEXT.get(reason, source_health.REASON_TEXT["unavailable"])
+        return f"{label} is unavailable right now ({reason_text}) — continuing with the other sources."
+    return f"No matches from {label}."
+
+
+def _not_configured_sources(outcomes: dict[str, str]) -> list[str]:
+    return [s for s, reason in outcomes.items() if reason == source_health.NOT_CONFIGURED]
+
+
+def _sources_summary(
+    notices: list[dict[str, str]], not_configured: list[str] | None = None
+) -> tuple[list[str], str, bool]:
+    """(labels that answered, note naming the skipped sources, whether every source failed)."""
+    failed = {notice["source"] for notice in notices} | set(not_configured or [])
+    used = [_SOURCE_LABELS[s] for s in _SOURCE_DISPLAY_ORDER if s not in failed and s in _SOURCE_LABELS]
+    if not notices:
+        return used, "", False
+    if not used:
+        labels = _join_labels([notice["label"] for notice in notices])
+        return used, f"{labels} couldn't be reached right now, so no grants could be checked.", True
+    skipped = _join_labels([f"{notice['label']} ({notice['reason_text']})" for notice in notices])
+    verb = "is" if len(notices) == 1 else "are"
+    return used, f"{skipped} {verb} unavailable right now, so this search used {_join_labels(used)}.", False
 
 
 def _score_one_source(
@@ -1732,12 +1827,12 @@ def _initial_status_event(payload: dict[str, Any], *, agent: bool) -> dict[str, 
     overrides = payload.get("overrides") or {}
     if agent:
         message = (
-            "Searching Grants.gov, Simpler.Grants.gov and GrantedAI and screening for eligibility…"
+            "Searching Grants.gov, OpenGrants, Simpler.Grants.gov and GrantedAI and screening for eligibility…"
             + _status_override_note(payload)
         )
     else:
         message = (
-            "Searching Grants.gov, Simpler.Grants.gov and GrantedAI and screening for eligibility…"
+            "Searching Grants.gov, OpenGrants, Simpler.Grants.gov and GrantedAI and screening for eligibility…"
             + _status_override_note(payload)
         )
     return {
@@ -1762,8 +1857,12 @@ def _done_event(
     *,
     stats: dict[str, int] | None = None,
     also: list[dict[str, Any]] | None = None,
+    notices: list[dict[str, str]] | None = None,
+    not_configured: list[str] | None = None,
 ) -> dict[str, Any]:
     also = also or []
+    notices = notices or []
+    sources_used, source_note, all_failed = _sources_summary(notices, not_configured)
     high = sum(1 for m in final if m.get("chance_tier") == "high")
     medium = sum(1 for m in final if m.get("chance_tier") == "medium")
     if final:
@@ -1771,6 +1870,8 @@ def _done_event(
             f"Ranked {len(final)} opportunities "
             f"({high} high, {medium} medium chance)."
         )
+    elif all_failed:
+        done_message = "Couldn't reach the grant sources right now. Please try again in a few minutes."
     else:
         done_message = "No eligible matches for your project right now."
 
@@ -1804,6 +1905,11 @@ def _done_event(
         "screened_note": note,
         "also_matches": also,
         "also_count": len(also),
+        # Sources that failed this search: the results come from the rest.
+        "source_notices": notices,
+        "source_note": source_note,
+        "sources_used": sources_used,
+        "all_sources_failed": all_failed,
     }
 
 
@@ -1823,34 +1929,58 @@ async def _aiter_fallback_events(
     collected: dict[str, list[dict[str, Any]]] = {
         source: [] for source in RECOMMENDATION_SOURCES
     }
+    # Start tracking right before the tasks are created so they share this dict.
+    outcomes = source_health.start()
     tasks = {name: asyncio.create_task(fn()) for name, fn in jobs.items()}
     name_by_task = {task: name for name, task in tasks.items()}
     pending: set[asyncio.Task] = set(tasks.values())
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _source_max_seconds()
+
+    def _source_event(source: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
+        label = _SOURCE_LABELS.get(source, source)
+        scored = _score_one_source(source, rows, profile=payload)
+        reason = None if rows else source_health.failure_reason(outcomes, source)
+        return {
+            "type": "source",
+            "source": source,
+            "label": label,
+            "message": _source_event_message(label, len(scored), reason),
+            "matches": scored,
+            "count": len(scored),
+            "location": location,
+            "status": "unavailable" if reason else "ok",
+            "reason": reason or "",
+        }
+
     while pending:
-        done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            break
+        done, pending = await asyncio.wait(
+            pending, timeout=remaining, return_when=asyncio.FIRST_COMPLETED
+        )
         for task in done:
             source = name_by_task[task]
-            label = _SOURCE_LABELS.get(source, source)
             try:
                 rows = task.result() or []
             except Exception:
                 logger.warning("%s stream fetch failed", source, exc_info=True)
+                outcomes.setdefault(source, source_health.UNAVAILABLE)
                 rows = []
             collected[source] = rows
-            scored = _score_one_source(source, rows, profile=payload)
-            yield {
-                "type": "source",
-                "source": source,
-                "label": label,
-                "message": (
-                    f"Found {len(scored)} from {label}."
-                    if scored
-                    else f"No matches from {label}."
-                ),
-                "matches": scored,
-                "count": len(scored),
-                "location": location,
-            }
+            yield _source_event(source, rows)
+
+    # A source still running at the cap is dropped; the others' results are used.
+    for task in pending:
+        task.cancel()
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+    for task in pending:
+        source = name_by_task[task]
+        logger.warning("%s did not finish within %.0fs; continuing without it", source, _source_max_seconds())
+        outcomes[source] = source_health.TIMEOUT
+        yield _source_event(source, [])
 
     # Freshness → eligibility → scoring, instantly and in that order.
     final, stats, also = recommendation_sections(
@@ -1859,7 +1989,14 @@ async def _aiter_fallback_events(
         limit=DEFAULT_CANDIDATE_LIMIT,
         feedback=payload.get("feedback"),
     )
-    yield _done_event(final, location, stats=stats, also=also)
+    yield _done_event(
+        final,
+        location,
+        stats=stats,
+        also=also,
+        notices=_source_notices(outcomes, collected),
+        not_configured=_not_configured_sources(outcomes),
+    )
 
 
 async def _aiter_agent_events(
@@ -1879,6 +2016,7 @@ async def _aiter_agent_events(
     yield _initial_status_event(payload, agent=True)
 
     agent = build_grant_agent(payload)
+    outcomes = source_health.start()
     result = Runner.run_streamed(
         agent,
         _matching_prompt(payload, user_query),
@@ -1931,18 +2069,17 @@ async def _aiter_agent_events(
         emitted_sources.add(tool_name)
         scored = _score_one_source(tool_name, rows, profile=payload)
         label = _SOURCE_LABELS.get(tool_name, tool_name)
+        reason = None if rows else source_health.failure_reason(outcomes, tool_name)
         yield {
             "type": "source",
             "source": tool_name,
             "label": label,
-            "message": (
-                f"Found {len(scored)} from {label}."
-                if scored
-                else f"No matches from {label}."
-            ),
+            "message": _source_event_message(label, len(scored), reason),
             "matches": scored,
             "count": len(scored),
             "location": location,
+            "status": "unavailable" if reason else "ok",
+            "reason": reason or "",
         }
 
         # Once every source has streamed in, we already have all the data we need.
@@ -1978,7 +2115,14 @@ async def _aiter_agent_events(
         limit=DEFAULT_CANDIDATE_LIMIT,
         feedback=payload.get("feedback"),
     )
-    yield _done_event(matches, location, stats=stats, also=also)
+    yield _done_event(
+        matches,
+        location,
+        stats=stats,
+        also=also,
+        notices=_source_notices(outcomes, collected),
+        not_configured=_not_configured_sources(outcomes),
+    )
 
 
 async def aiter_grant_matching_events(
@@ -2100,6 +2244,7 @@ def build_grant_agent(defaults: dict[str, Any] | None = None):
     from services.tools import (
         build_granted_ai_tool,
         build_grants_gov_tool,
+        build_opengrants_tool,
         build_simpler_grants_tool,
     )
 
@@ -2113,6 +2258,7 @@ def build_grant_agent(defaults: dict[str, Any] | None = None):
             build_grants_gov_tool(tool_defaults),
             build_granted_ai_tool(tool_defaults),
             build_simpler_grants_tool(tool_defaults),
+            build_opengrants_tool(tool_defaults),
         ],
         output_type=GrantMatchResult,
         model=os.getenv("OPENAI_MODEL", "gpt-5.5"),

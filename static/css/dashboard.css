@@ -539,6 +539,12 @@ body {
   background: #f6f5fb;
 }
 
+.source-opengrants {
+  color: #2d5046;
+  border-color: #c9ddd3;
+  background: #eef5f1;
+}
+
 .match-info {
   display: grid;
   gap: 0.22rem;

@@ -25,6 +25,7 @@ from typing import Any
 
 import httpx
 
+from services import source_health
 from services.async_utils import build_async_client, json_body, run_sync
 from services.grants_gov import (
     PRIORITY_AREA_TO_FUNDING_CATEGORY,
@@ -308,9 +309,11 @@ async def _post_search_async(
             response = await client.post(SEARCH_URL, json=body)
         except httpx.TimeoutException:
             logger.warning("Simpler.Grants.gov search timed out")
+            source_health.report("simpler_grants", source_health.TIMEOUT)
             return None
         except httpx.HTTPError as exc:
             logger.warning("Simpler.Grants.gov request failed: %s", exc)
+            source_health.report("simpler_grants", source_health.UNAVAILABLE)
             return None
 
         status = response.status_code
@@ -319,18 +322,22 @@ async def _post_search_async(
             data = payload.get("data") if isinstance(payload, dict) else None
             if not isinstance(data, list):
                 logger.warning("Simpler.Grants.gov returned an unexpected response body")
+                source_health.report("simpler_grants", source_health.UNAVAILABLE)
                 return None
+            source_health.clear("simpler_grants")
             return [row for row in data if isinstance(row, dict)]
         if status in (401, 403):
             logger.error(
                 "Simpler.Grants.gov rejected the API key (HTTP %s); check SIMPLER_GRANTS_API_KEY",
                 status,
             )
+            source_health.report("simpler_grants", source_health.AUTH)
             return None
         if status in (429, 500, 502, 503, 504) and attempt < MAX_ATTEMPTS:
             await asyncio.sleep(0.5 * 2 ** (attempt - 1))
             continue
         logger.warning("Simpler.Grants.gov search failed: HTTP %s %s", status, response.text[:300])
+        source_health.report("simpler_grants", source_health.reason_for_status(status))
         return None
     return None
 
@@ -363,6 +370,7 @@ async def search_opportunities_async(
         if not _WARNED_NO_KEY["done"]:
             logger.warning("SIMPLER_GRANTS_API_KEY is not set; skipping Simpler.Grants.gov")
             _WARNED_NO_KEY["done"] = True
+        source_health.not_configured("simpler_grants")
         return []
 
     subject = _build_subject(keyword, priority_area, location_city, location_state)
@@ -395,8 +403,10 @@ async def search_opportunities_async(
             return await asyncio.wait_for(_run(active), timeout=budget)
         except asyncio.TimeoutError:
             logger.warning("Simpler.Grants.gov did not answer within %.0fs; continuing without it", budget)
+            source_health.report("simpler_grants", source_health.TIMEOUT)
         except Exception:
             logger.warning("Simpler.Grants.gov search failed", exc_info=True)
+            source_health.report("simpler_grants", source_health.UNAVAILABLE)
         return None
 
     if client is not None:
@@ -412,6 +422,7 @@ async def search_opportunities_async(
                 "Simpler.Grants.gov unavailable; serving results cached %.0f min ago",
                 (time.time() - stale[0]) / 60,
             )
+            source_health.clear("simpler_grants")
             return list(stale[1])
         return []
 

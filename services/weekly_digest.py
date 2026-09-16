@@ -34,6 +34,7 @@ SOURCE_LABELS = {
     "usaspending": "USASpending",
     "granted_ai": "GrantedAI",
     "simpler_grants": "Simpler.Grants.gov",
+    "opengrants": "OpenGrants",
 }
 
 ORG_TYPE_LABELS = {

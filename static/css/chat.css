@@ -626,6 +626,45 @@ body.chat-sidebar-collapsed .chat-sidebar-toggle {
   color: var(--chat-muted);
 }
 
+/* A source was skipped (daily limit, timeout, outage); results come from the rest. */
+.chat-source-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.55rem;
+  max-width: 100%;
+  margin: 0.6rem 0 0.2rem;
+  padding: 0.6rem 0.8rem;
+  border: 1px solid #ebdfc6;
+  border-radius: 12px;
+  background: #fbf7ee;
+  color: #5f5238;
+}
+
+.chat-source-notice-icon {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  margin-top: 0.08rem;
+  color: #a27a2c;
+}
+
+.chat-source-notice-icon svg {
+  width: 1.05rem;
+  height: 1.05rem;
+}
+
+.chat-source-notice-text {
+  min-width: 0;
+  margin: 0;
+  font-size: 0.88rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.chat-empty-body .chat-source-notice {
+  margin-top: 0.7rem;
+}
+
 .chat-empty-tips {
   margin: 0.7rem 0 0;
   padding-left: 1.1rem;

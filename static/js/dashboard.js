@@ -15,6 +15,7 @@
     if (source === "usaspending") return "USASpending";
     if (source === "granted_ai") return "GrantedAI";
     if (source === "simpler_grants") return "Simpler.Grants.gov";
+    if (source === "opengrants") return "OpenGrants";
     return "Grants.gov";
   };
 
@@ -299,7 +300,7 @@
       place = `, for ${[city, state].filter(Boolean).join(", ")}`;
     }
     const noun = count === 1 ? "opportunity" : "opportunities";
-    subtitle.textContent = `${count} eligible ${noun} from Grants.gov, Simpler.Grants.gov and GrantedAI${place}`;
+    subtitle.textContent = `${count} eligible ${noun} from OpenGrants, Grants.gov, Simpler.Grants.gov and GrantedAI${place}`;
   }
 
   function bindViewMore(hiddenCount) {
@@ -341,7 +342,7 @@
       ${renderSkeleton(3)}
     `;
     if (subtitle) {
-      subtitle.textContent = "Loading eligible opportunities from Grants.gov, Simpler.Grants.gov and GrantedAI…";
+      subtitle.textContent = "Loading eligible opportunities from OpenGrants, Grants.gov, Simpler.Grants.gov and GrantedAI…";
     }
 
     try {

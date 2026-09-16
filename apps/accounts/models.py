@@ -101,6 +101,7 @@ class SavedGrant(models.Model):
         USASPENDING = "usaspending", "USASpending"
         GRANTED_AI = "granted_ai", "GrantedAI"
         SIMPLER_GRANTS = "simpler_grants", "Simpler.Grants.gov"
+        OPENGRANTS = "opengrants", "OpenGrants"
 
     user = models.ForeignKey(
         GrantUser,

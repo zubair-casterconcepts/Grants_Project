@@ -11,6 +11,7 @@ from typing import Any
 
 import httpx
 
+from services import source_health
 from services.async_utils import build_async_client, json_body, run_sync
 
 logger = logging.getLogger(__name__)
@@ -539,8 +540,12 @@ async def _post_search2_async(
             json=payload,
             headers={"Content-Type": "application/json"},
         )
-    except httpx.HTTPError:
+    except httpx.HTTPError as exc:
         logger.exception("Grants.gov search2 network error")
+        source_health.report(
+            "grants_gov",
+            source_health.TIMEOUT if isinstance(exc, httpx.TimeoutException) else source_health.UNAVAILABLE,
+        )
         return []
 
     if response.status_code != 200:
@@ -549,19 +554,23 @@ async def _post_search2_async(
             response.status_code,
             response.text[:500],
         )
+        source_health.report("grants_gov", source_health.reason_for_status(response.status_code))
         return []
 
     body = json_body(response)
     if not isinstance(body, dict):
         logger.error("Grants.gov search2 returned invalid JSON")
+        source_health.report("grants_gov", source_health.UNAVAILABLE)
         return []
 
     data = body.get("data") or {}
     hits = data.get("oppHits") or []
     if not isinstance(hits, list):
         logger.error("Grants.gov search2 oppHits was not a list: %r", type(hits))
+        source_health.report("grants_gov", source_health.UNAVAILABLE)
         return []
 
+    source_health.clear("grants_gov")
     return [hit for hit in hits if isinstance(hit, dict)]
 
 

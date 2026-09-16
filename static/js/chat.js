@@ -678,7 +678,7 @@
     if (starterCopyEl) {
       starterCopyEl.textContent = onboarded
         ? `Tell me about ${projectTitle} and I'll find matching opportunities, help you refine details, and save the best fits.`
-        : "Answer a few quick questions about your organization and project, then I'll search Grants.gov, Simpler.Grants.gov and GrantedAI for opportunities you're eligible for.";
+        : "Answer a few quick questions about your organization and project, then I'll search OpenGrants, Grants.gov, Simpler.Grants.gov and GrantedAI for opportunities you're eligible for.";
     }
 
     const cards = onboarded
@@ -778,45 +778,118 @@
   const EMPTY_ICON_SVG =
     '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="6.5"></circle><path d="m20 20-3.8-3.8"></path><path d="M8.5 11h5"></path></svg>';
 
-  function emptyResultsHtml(location, screenedNote) {
+  // ── Sources that could not answer (daily limit, timeout, outage) ──────────
+  // A search still shows results from the sources that did answer; this note
+  // says which ones were skipped so a shorter list is not mistaken for "nothing".
+  const ALL_SOURCES_TEXT = "OpenGrants, Grants.gov, Simpler.Grants.gov and GrantedAI";
+  const NOTICE_ICON_SVG =
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"></circle><path d="M12 7.5v5.5"></path><path d="M12 16.5h.01"></path></svg>';
+
+  function joinLabels(labels) {
+    const list = (Array.isArray(labels) ? labels : []).filter(Boolean);
+    if (list.length <= 1) return list.join("");
+    return `${list.slice(0, -1).join(", ")} and ${list[list.length - 1]}`;
+  }
+
+  function sourcesText(sourceInfo) {
+    const used = sourceInfo && Array.isArray(sourceInfo.used) ? sourceInfo.used : [];
+    return used.length ? joinLabels(used) : ALL_SOURCES_TEXT;
+  }
+
+  function sourceNoticeHtml(note) {
+    const text = String(note || "").trim();
+    if (!text) return "";
+    return (
+      `<div class="chat-source-notice" role="note">` +
+      `<span class="chat-source-notice-icon" aria-hidden="true">${NOTICE_ICON_SVG}</span>` +
+      `<p class="chat-source-notice-text">${escapeHtml(text)}</p>` +
+      `</div>`
+    );
+  }
+
+  // Normalizes the done event / saved metadata into one shape.
+  function sourceInfoFrom(data, retryQuery = "") {
+    const src = data || {};
+    return {
+      note: String(src.source_note || ""),
+      used: Array.isArray(src.sources_used) ? src.sources_used : [],
+      allFailed: Boolean(src.all_sources_failed),
+      retryQuery: String(retryQuery || src.retry_query || ""),
+    };
+  }
+
+  function sourceInfoMeta(sourceInfo) {
+    const info = sourceInfo || {};
+    return {
+      source_note: info.note || "",
+      sources_used: Array.isArray(info.used) ? info.used : [],
+      all_sources_failed: Boolean(info.allFailed),
+      retry_query: info.retryQuery || "",
+    };
+  }
+
+  function emptyResultsHtml(location, screenedNote, sourceInfo = {}) {
     const place = location || {};
     const placeText = placeTextFrom(place);
     const state = String(place.state || "").trim();
     const city = String(place.city || "").trim();
-    // Each label is sent as the user's message, so it must read as a request the
+    const info = sourceInfo || {};
+    // Each value is sent as the user's message, so it must read as a request the
     // parser understands: a state change, "…with my saved project" (clears chat
     // memory) or "Update my project" (opens intake).
     const actions = [];
-    if (city && state) actions.push(`Search all of ${state}`);
-    actions.push("Search with my saved project");
-    actions.push("Update my project");
-    const note = screenedNote
+    if (info.allFailed) {
+      // Nothing could be searched: offer the same search again first.
+      actions.push({ label: "Try again", value: info.retryQuery || "find grants" });
+      actions.push({ label: "Update my project", value: "Update my project" });
+    } else {
+      if (city && state) actions.push(`Search all of ${state}`);
+      actions.push("Search with my saved project");
+      actions.push("Update my project");
+    }
+    const note = screenedNote && !info.allFailed
       ? `<p class="chat-empty-note">${escapeHtml(screenedNote)}</p>`
       : "";
     const buttons = actions
-      .map(
-        (label) =>
-          `<button type="button" class="chat-empty-action" data-value="${attr(label)}">${escapeHtml(label)}</button>`
-      )
+      .map((action) => {
+        const label = typeof action === "string" ? action : action.label;
+        const value = typeof action === "string" ? action : action.value;
+        return `<button type="button" class="chat-empty-action" data-value="${attr(value)}">${escapeHtml(label)}</button>`;
+      })
       .join("");
+    const title = info.allFailed
+      ? "Grant sources are unavailable right now"
+      : "No matching grants right now";
+    const text = info.allFailed
+      ? `I couldn't reach any grant source to search${escapeHtml(placeText)}. This is usually temporary, so please try again in a few minutes.`
+      : `I searched ${escapeHtml(sourcesText(info))}${escapeHtml(placeText)}, but nothing open right now fits your eligibility, location and focus.`;
+    const tips = info.allFailed
+      ? ""
+      : `<ul class="chat-empty-tips"><li>Try a broader topic or a nearby area.</li><li>Loosen the budget or organization type.</li><li>New grants are posted often, so check back soon.</li></ul>`;
     return (
       `<div class="chat-empty" role="status">` +
-      `<div class="chat-empty-icon" aria-hidden="true">${EMPTY_ICON_SVG}</div>` +
+      `<div class="chat-empty-icon" aria-hidden="true">${info.allFailed ? NOTICE_ICON_SVG : EMPTY_ICON_SVG}</div>` +
       `<div class="chat-empty-body">` +
-      `<p class="chat-empty-title">No matching grants right now</p>` +
-      `<p class="chat-empty-text">I searched Grants.gov, Simpler.Grants.gov and GrantedAI${escapeHtml(placeText)}, but nothing open right now fits your eligibility, location and focus.</p>` +
+      `<p class="chat-empty-title">${title}</p>` +
+      `<p class="chat-empty-text">${text}</p>` +
+      sourceNoticeHtml(info.note) +
       note +
-      `<ul class="chat-empty-tips"><li>Try a broader topic or a nearby area.</li><li>Loosen the budget or organization type.</li><li>New grants are posted often, so check back soon.</li></ul>` +
+      tips +
       `<div class="chat-empty-actions">${buttons}</div>` +
       `</div></div>`
     );
   }
 
   // Saved with the card so reloads, chat memory and the sidebar keep working.
-  function emptyResultsText(location, screenedNote) {
+  function emptyResultsText(location, screenedNote, sourceInfo = {}) {
     const placeText = placeTextFrom(location || {});
+    const info = sourceInfo || {};
+    if (info.allFailed) {
+      return `I couldn't reach the grant sources right now${placeText}, so no grants could be checked. Please try again in a few minutes.`;
+    }
     const screened = screenedNote ? ` ${screenedNote}` : "";
-    return `I couldn't find eligible opportunities for this search${placeText}.${screened} Try broadening the topic, or update your project details and search again.`;
+    const skipped = info.note ? ` ${info.note}` : "";
+    return `I couldn't find eligible opportunities for this search${placeText}.${screened}${skipped} Try broadening the topic, or update your project details and search again.`;
   }
 
   function decorateEmptyResults(row) {
@@ -826,8 +899,8 @@
     row.querySelectorAll(".chat-empty-action").forEach((btn) => {
       btn.addEventListener("click", () => {
         if (busy) return;
-        const label = btn.dataset.value || btn.textContent || "";
-        handleUserMessage(label, label);
+        const value = btn.dataset.value || btn.textContent || "";
+        handleUserMessage(value, value);
       });
     });
   }
@@ -875,9 +948,10 @@
     }
     if (role === "assistant" && meta.type === "no_results") {
       Promise.resolve(
-        appendAssistantHtml(emptyResultsHtml(meta.location, meta.screened_note || ""), {
-          persist: false,
-        })
+        appendAssistantHtml(
+          emptyResultsHtml(meta.location, meta.screened_note || "", sourceInfoFrom(meta)),
+          { persist: false }
+        )
       ).then(decorateEmptyResults);
       return;
     }
@@ -887,6 +961,7 @@
         `Here are ${meta.matches.length} ranked opportunities.`;
       const row = appendAssistantHtml(
         `<p class="chat-match-summary">${escapeHtml(summary)}</p>
+         ${sourceNoticeHtml(meta.source_note)}
          <div class="chat-matches">${meta.matches
            .map((m, i) => renderCard(m, i))
            .join("")}</div>
@@ -1168,6 +1243,7 @@
     if (source === "usaspending") return "USASpending";
     if (source === "granted_ai") return "GrantedAI";
     if (source === "simpler_grants") return "Simpler.Grants.gov";
+    if (source === "opengrants") return "OpenGrants";
     return "Grants.gov";
   };
 
@@ -2105,9 +2181,17 @@
       });
     };
 
-    const renderFinal = async (matches, location, savedCount, screenedNote, alsoMatches = []) => {
+    const renderFinal = async (
+      matches,
+      location,
+      savedCount,
+      screenedNote,
+      alsoMatches = [],
+      sourceInfo = {}
+    ) => {
       const placeText = placeTextFrom(location);
       const finalMatches = Array.isArray(matches) ? matches : [];
+      const info = sourceInfo || {};
       // The final list is authoritative. If eligibility screening removed
       // everything, clear any preview cards too — never leave unscreened cards
       // on screen under an "eligible opportunities" heading.
@@ -2120,16 +2204,18 @@
         if (statusRow) removeNode(statusRow);
         statusRow = null;
         statusBubble = null;
-        const emptyRow = await appendAssistantHtml(emptyResultsHtml(location, screenedNote), {
-          persist: false,
-        });
+        const emptyRow = await appendAssistantHtml(
+          emptyResultsHtml(location, screenedNote, info),
+          { persist: false }
+        );
         decorateEmptyResults(emptyRow);
         scrollToBottom({ force: true });
         const alsoRows = await showAlsoSection(alsoMatches, location);
-        await persistMessage("assistant", emptyResultsText(location, screenedNote), {
+        await persistMessage("assistant", emptyResultsText(location, screenedNote, info), {
           type: "no_results",
           location: location || {},
           screened_note: screenedNote || "",
+          ...sourceInfoMeta(info),
         });
         await persistAlsoSection(alsoRows, location);
         return;
@@ -2186,8 +2272,13 @@
 
       const total = displayedMatches.length || finalMatches.length;
       const noun = total === 1 ? "opportunity" : "opportunities";
-      const summary = `Here are ${total} eligible ${noun} from Grants.gov, Simpler.Grants.gov and GrantedAI${placeText}.`;
+      const summary = `Here are ${total} eligible ${noun} from ${sourcesText(info)}${placeText}.`;
       if (summaryEl) summaryEl.textContent = summary;
+      if (resultsRow && summaryEl && info.note) {
+        const existing = resultsRow.querySelector(".chat-source-notice");
+        if (existing) existing.remove();
+        summaryEl.insertAdjacentHTML("afterend", sourceNoticeHtml(info.note));
+      }
       // Say what was screened out, so a short list reads as "we filtered the
       // noise" rather than "the search found almost nothing".
       setProgressNote(screenedNote || "");
@@ -2211,6 +2302,7 @@
         // Persist the final on-screen order (grouped by source, sorted within).
         matches: displayedMatches.length ? displayedMatches : finalMatches,
         location: location || {},
+        source_note: info.note || "",
       });
       await persistAlsoSection(alsoRows, location);
     };
@@ -2273,7 +2365,8 @@
             event.location || {},
             event.saved_count,
             event.screened_note || "",
-            Array.isArray(event.also_matches) ? event.also_matches : []
+            Array.isArray(event.also_matches) ? event.also_matches : [],
+            sourceInfoFrom(event, queryText)
           );
           return;
         }
@@ -2297,7 +2390,8 @@
           data.location || {},
           data.saved_count,
           data.screened_note || "",
-          Array.isArray(data.also_matches) ? data.also_matches : []
+          Array.isArray(data.also_matches) ? data.also_matches : [],
+          sourceInfoFrom(data, queryText)
         );
       }
 
@@ -2330,7 +2424,7 @@
       removeNode(typing);
       appendText(
         "assistant",
-        "Thanks — your project profile is ready. I'll search Grants.gov, Simpler.Grants.gov and GrantedAI now, and only show opportunities you're eligible for."
+        "Thanks — your project profile is ready. I'll search OpenGrants, Grants.gov, Simpler.Grants.gov and GrantedAI now, and only show opportunities you're eligible for."
       );
       await loadMatches();
     } catch (err) {
