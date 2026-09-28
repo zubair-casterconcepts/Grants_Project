@@ -10,7 +10,6 @@ from typing import Any
 
 import httpx
 
-from services import source_health
 from services.async_utils import build_async_client, json_body, run_sync
 
 logger = logging.getLogger(__name__)
@@ -44,8 +43,8 @@ def _reuse_seconds() -> float:
 
 # When GrantedAI is down, /discover answers HTTP 504 after ~30s and /grants takes
 # 25–55s, so one search could wait ~90s and Find Grants looked stuck. Cap the
-# wait per search. Skipping GrantedAI for a while after a search that timed out
-# is optional (GRANTED_AI_COOLDOWN_SECONDS); by default every search waits for it.
+# wait per search, and after a search that timed out with nothing, skip GrantedAI
+# for a short while so the next searches don't wait on it again.
 _UNAVAILABLE_UNTIL = {"at": 0.0}
 
 
@@ -57,25 +56,13 @@ def _env_seconds(name: str, default: float) -> float:
 
 
 def _search_budget_seconds() -> float:
-    # /discover (the AI-ranked results) often needs 15–25s, so a search waits up
-    # to 25s for it instead of dropping it. GRANTED_AI_TIMEOUT_SECONDS overrides.
-    return _env_seconds("GRANTED_AI_TIMEOUT_SECONDS", 25)
+    # Healthy GrantedAI answers took 9–18s; 15s keeps a search (or its "no grants"
+    # message) from waiting long on an outage. GRANTED_AI_TIMEOUT_SECONDS overrides.
+    return _env_seconds("GRANTED_AI_TIMEOUT_SECONDS", 15)
 
 
 def _cooldown_seconds() -> float:
-    """Seconds to skip GrantedAI after a search timed out. Default 0: never skip."""
-    try:
-        return max(0.0, float(os.getenv("GRANTED_AI_COOLDOWN_SECONDS", "0")))
-    except ValueError:
-        return 0.0
-
-
-def _has_rows(task: asyncio.Task) -> bool:
-    """A finished request task that returned grant rows."""
-    if not task.done() or task.cancelled() or task.exception() is not None:
-        return False
-    body = task.result()
-    return isinstance(body, dict) and isinstance(body.get("data"), list) and bool(body["data"])
+    return _env_seconds("GRANTED_AI_COOLDOWN_SECONDS", 120)
 
 
 def _task_body(task: asyncio.Task, name: str) -> dict[str, Any] | None:
@@ -275,7 +262,6 @@ async def _get_json_async(
 
         if response.status_code == 429:
             logger.warning("GrantedAI rate limit reached (429)")
-            source_health.report("granted_ai", source_health.QUOTA)
             return None
 
         if response.status_code == 504:
@@ -293,8 +279,6 @@ async def _get_json_async(
             response.status_code,
             response.text[:300],
         )
-        if response.status_code in (401, 403):
-            source_health.report("granted_ai", source_health.AUTH)
         return None
 
     logger.warning("GrantedAI unavailable after retries (%s)", last_error)
@@ -367,14 +351,12 @@ async def search_grants_async(
                 why,
                 (time.time() - stale[0]) / 60,
             )
-            source_health.clear("granted_ai")
             return list(stale[1])
         return []
 
     skip_for = _UNAVAILABLE_UNTIL["at"] - time.time()
     if skip_for > 0:
         logger.info("GrantedAI skipped: it timed out recently (retrying in %.0fs)", skip_for)
-        source_health.report("granted_ai", source_health.TIMEOUT)
         return []
 
     async def _run(active: httpx.AsyncClient) -> list[dict[str, Any]]:
@@ -397,9 +379,7 @@ async def search_grants_async(
         }
 
         # Kick both third-party GETs concurrently; prefer discover when it returns rows.
-        # Wait for discover up to the search budget. Once it answers with grants,
-        # /grants is not waited on; if discover fails, is empty or is still running
-        # when the budget ends, /grants (usually faster) is used instead.
+        # Wait no longer than the search budget — whatever answered in time is used.
         budget = _search_budget_seconds()
         timed_out = False
         failed = False
@@ -410,22 +390,8 @@ async def search_grants_async(
             grants_task = asyncio.create_task(
                 _get_json_async(active, GRANTS_URL, grants_params)
             )
-            loop = asyncio.get_running_loop()
-            deadline = loop.time() + budget
-            pending = {discover_task, grants_task}
-            while pending and not _has_rows(discover_task):
-                remaining = deadline - loop.time()
-                if remaining <= 0:
-                    break
-                done, pending = await asyncio.wait(
-                    pending, timeout=remaining, return_when=asyncio.FIRST_COMPLETED
-                )
-                if not done:
-                    break
+            _, pending = await asyncio.wait({discover_task, grants_task}, timeout=budget)
             if pending:
-                # An unfinished /grants after discover returned grants is simply no
-                # longer needed; anything else still running means the budget ran out.
-                timed_out = not _has_rows(discover_task)
                 timed_out = True
                 for task in pending:
                     task.cancel()
@@ -469,29 +435,17 @@ async def search_grants_async(
 
         if results:
             _CACHE[key] = (time.time(), results)
-            source_health.clear("granted_ai")
             return results
-
-        if timed_out or failed:
-            source_health.report(
-                "granted_ai", source_health.TIMEOUT if timed_out else source_health.UNAVAILABLE
-            )
-        else:
-            # Answered with no grants for this search: not a failure.
-            source_health.clear("granted_ai")
 
         if timed_out:
             cooldown = _cooldown_seconds()
-            if cooldown:
-                _UNAVAILABLE_UNTIL["at"] = time.time() + cooldown
-                logger.warning(
-                    "GrantedAI did not answer within %.0fs; continuing without it "
-                    "and skipping it for the next %.0fs",
-                    budget,
-                    cooldown,
-                )
-            else:
-                logger.warning("GrantedAI did not answer within %.0fs; continuing without it", budget)
+            _UNAVAILABLE_UNTIL["at"] = time.time() + cooldown
+            logger.warning(
+                "GrantedAI did not answer within %.0fs; continuing without it "
+                "and skipping it for the next %.0fs",
+                budget,
+                cooldown,
+            )
             return _stale_results("timed out")
         if failed:
             return _stale_results("could not be reached")
