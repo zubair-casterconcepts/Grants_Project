@@ -50,6 +50,7 @@ INSTALLED_APPS = [
     "apps.accounts.apps.AccountsConfig",
     "apps.auth.apps.AuthConfig",
     "apps.projects.apps.ProjectsConfig",
+    "apps.funders.apps.FundersConfig",
 ]
 
 MIDDLEWARE = [

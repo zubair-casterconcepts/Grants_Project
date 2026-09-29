@@ -19,6 +19,7 @@ from apps.accounts.chat_services import (
 from apps.accounts.forms import ProfileAccountForm, ProfileIntakeForm, STATE_CHOICES
 from apps.accounts.models import Conversation, GrantFeedback, Profile, SavedGrant
 from apps.accounts.services import feedback_signals, get_or_create_profile
+from apps.funders.matching import funders_for_search
 from services.grant_agent import iter_grant_matching_events, run_grant_matching_agent
 from services.location_utils import normalize_location
 from services.query_context import resolve_search_context
@@ -262,6 +263,7 @@ def matches_api_view(request):
                 "matches": prepared,
                 "match_count": len(prepared),
                 "also_matches": also_prepared,
+                "funders": funders_for_search(ctx),
                 "saved_count": saved_count,
                 "location": {
                     "city": ctx.get("location_city") or "",
@@ -295,11 +297,16 @@ def matches_stream_api_view(request):
     signals = feedback_signals(request.user)
 
     def event_stream():
+        search_context = None
         try:
             for event in iter_grant_matching_events(
                 profile, user_query=user_query, feedback=signals
             ):
                 payload = dict(event)
+                if search_context is None and payload.get("search_context"):
+                    # The fields this grants search resolved (profile + message
+                    # overrides); foundations are matched on the same ones.
+                    search_context = payload["search_context"]
                 if "matches" in payload:
                     prepared, saved_count = _prepare_matches(
                         request.user, payload.get("matches") or []
@@ -314,6 +321,9 @@ def matches_stream_api_view(request):
                         request.user, payload["also_matches"]
                     )
                 yield f"data: {json.dumps(payload)}\n\n"
+            # After the grants are shown: foundations that funded similar work.
+            funders = funders_for_search(search_context or resolve_search_context(profile, user_query))
+            yield f"data: {json.dumps({'type': 'funders', **funders})}\n\n"
         except Exception:
             fail = {
                 "type": "error",

@@ -848,6 +848,144 @@
     );
   }
 
+  // ── "Foundations that fund similar work" ──────────────────────────────────
+  // Michigan foundations whose IRS filings show past grants in the searched
+  // priority area. They have no deadline or apply link, so they get their own
+  // section below the grants instead of being mixed into the grants list.
+  const FUNDERS_SECTION_TITLE = "Foundations that fund similar work";
+
+  function formatMoney(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n) || n <= 0) return "";
+    return `$${Math.round(n).toLocaleString("en-US")}`;
+  }
+
+  function funderTier(score) {
+    const n = Number(score) || 0;
+    return n >= 0.6 ? "high" : n >= 0.4 ? "medium" : "low";
+  }
+
+  function funderContactHtml(funder) {
+    if (funder.accepts_requests === false) {
+      return `<span class="info-value-muted">Does not accept unsolicited requests — gives only to organizations it selects.</span>`;
+    }
+    const contact = funder.contact;
+    if (funder.accepts_requests !== true || !contact) {
+      return `<span class="info-value-muted">No application contact listed in its IRS filings.</span>`;
+    }
+    const parts = [contact.name, contact.phone ? `Phone: ${contact.phone}` : "", contact.address]
+      .map((part) => String(part || "").trim())
+      .filter(Boolean);
+    const howTo = String(contact.how_to_apply || "").replace(/\s+/g, " ").trim();
+    return (
+      renderContactChips(parts.join(" · ")) +
+      (howTo ? `<span class="info-sub funder-how-to">${escapeHtml(howTo.length > 240 ? `${howTo.slice(0, 237)}…` : howTo)}</span>` : "")
+    );
+  }
+
+  function funderExamplesHtml(funder) {
+    const rows = (funder.example_grants || []).map((grant) => {
+      const who = grant.recipient_name === "(individual)" ? "An individual" : grant.recipient_name;
+      const place = [grant.recipient_city, grant.recipient_state].filter(Boolean).join(", ");
+      return (
+        `<li><strong>${escapeHtml(formatMoney(grant.amount))}</strong> to ${escapeHtml(who)}` +
+        `${place ? ` <span class="funder-example-meta">(${escapeHtml(place)})</span>` : ""}` +
+        `${grant.tax_year ? ` <span class="funder-example-meta">· ${escapeHtml(grant.tax_year)}</span>` : ""}</li>`
+      );
+    });
+    return rows.length ? `<ul class="funder-examples">${rows.join("")}</ul>` : "";
+  }
+
+  function renderFunderCard(funder, index, area) {
+    const score = Number(funder.score || 0).toFixed(2);
+    const tier = funderTier(funder.score);
+    const categories = (funder.top_categories || [])
+      .map(
+        (cat) =>
+          `<span class="category-pill" title="Gives most to: ${attr(cat)}"><span class="category-pill-icon" aria-hidden="true">${icons.tag}</span><span>${escapeHtml(cat)}</span></span>`
+      )
+      .join("");
+    const grants = Number(funder.grants_in_category || 0);
+    const facts = [
+      [`Grants for ${area}`, `${grants} ${grants === 1 ? "grant" : "grants"} · ${formatMoney(funder.amount_in_category) || "$0"}`],
+      ["Typical grant", formatMoney(funder.typical_grant_in_category) || "—"],
+      ["Michigan giving", `${Math.round(Number(funder.michigan_grants_pct) || 0)}% of grants`],
+    ]
+      .map(
+        ([label, value]) =>
+          `<div class="fact-item">${labelWithIcon(icons.cash, escapeHtml(label))}<strong>${escapeHtml(value)}</strong></div>`
+      )
+      .join("");
+    const irsUrl = funder.ein
+      ? `https://projects.propublica.org/nonprofits/organizations/${encodeURIComponent(funder.ein)}`
+      : "";
+    return `
+      <article class="match-card funder-card chance-${attr(tier)}" style="--i: ${index}" data-match-key="funder:${attr(funder.ein || funder.funder)}">
+        <div class="score-badge" title="Match score" aria-label="Match score ${score}">${escapeHtml(score)}</div>
+        <div class="match-content">
+          <div class="match-head">
+            <h2>${escapeHtml(funder.funder || "Foundation")}</h2>
+            ${categories}
+            <span class="source-pill source-foundation">Foundation</span>
+          </div>
+          <div class="match-info">
+            <div class="fact-grid">${facts}</div>
+            ${
+              funderExamplesHtml(funder)
+                ? `<div class="info-row">${labelWithIcon(icons.building, "Past grants")}${funderExamplesHtml(funder)}</div>`
+                : ""
+            }
+            <div class="info-row">${labelWithIcon(icons.pin, "How to reach them")}${funderContactHtml(funder)}</div>
+          </div>
+          ${
+            irsUrl
+              ? `<div class="match-footer"><span></span><div class="match-actions"><a class="btn-view" href="${attr(irsUrl)}" target="_blank" rel="noopener noreferrer">IRS filings</a></div></div>`
+              : ""
+          }
+        </div>
+      </article>
+    `;
+  }
+
+  function fundersSectionHtml(data) {
+    const info = data || {};
+    const area = String(info.priority_area || "").trim();
+    const state = String(info.state || "").trim().toUpperCase();
+    const funders = Array.isArray(info.funders) ? info.funders : [];
+    let note = area
+      ? `Michigan-based foundations whose IRS filings show past grants for ${escapeHtml(area)}. They don't post open calls — reach out directly to the ones that accept requests.`
+      : "Michigan-based foundations whose IRS filings show past grants for similar work.";
+    if (state && state !== "MI") {
+      note += ` Your search is for ${escapeHtml(state)}, so they are ranked without the Michigan weighting.`;
+    }
+    const body = funders.length
+      ? `<div class="chat-matches">${funders.map((funder, i) => renderFunderCard(funder, i, area || "this area")).join("")}</div>`
+      : `<div class="funder-empty" role="status">${
+          area
+            ? `No foundations in our IRS data have made ${escapeHtml(area)} grants yet.`
+            : "Add a priority area to your project to see foundations that fund similar work."
+        }</div>`;
+    return (
+      `<div class="chat-also-head chat-funders-head"><p class="chat-also-title">${FUNDERS_SECTION_TITLE}</p>` +
+      `<p class="chat-also-note">${note}</p></div>` +
+      body
+    );
+  }
+
+  async function showFundersSection(data, { persist = true } = {}) {
+    if (!data || typeof data !== "object") return;
+    await appendAssistantHtml(fundersSectionHtml(data), { persist: false });
+    if (!persist) return;
+    await persistMessage("assistant", FUNDERS_SECTION_TITLE, {
+      type: "funders",
+      section: "funders",
+      priority_area: data.priority_area || "",
+      state: data.state || "",
+      budget: data.budget ?? null,
+      funders: Array.isArray(data.funders) ? data.funders : [],
+    });
+  }
+
   function bindResultsRow(el) {
     if (!el) return;
     bindSaveForms(el);
@@ -862,6 +1000,10 @@
     // Never replay transient system load errors into the thread.
     if (content.includes("I couldn't load that conversation")) return;
     const meta = message.metadata || {};
+    if (role === "assistant" && meta.section === "funders") {
+      showFundersSection(meta, { persist: false });
+      return;
+    }
     if (
       role === "assistant" &&
       meta.section === "also" &&
@@ -2278,6 +2420,11 @@
           );
           return;
         }
+        if (type === "funders") {
+          // Arrives after "done": the grants are already on screen and saved.
+          await showFundersSection(event);
+          return;
+        }
         if (type === "error") {
           throw new Error(event.message || "match_failed");
         }
@@ -2300,6 +2447,7 @@
           data.screened_note || "",
           Array.isArray(data.also_matches) ? data.also_matches : []
         );
+        if (data.funders) await showFundersSection(data.funders);
       }
 
       setSuggestions([
