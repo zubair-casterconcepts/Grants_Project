@@ -10,6 +10,28 @@ from django.db import transaction
 from apps.funders.models import Filing, FunderProfile, PastGrant
 
 NOT_A_FOCUS = {"Unclear", "Other"}  # counted in totals, never a top category
+INDIVIDUAL = "(individual)"  # recipient_name of every grant paid to a person (names are never stored)
+
+
+def new_category():
+    return {"count": 0, "total_amount": Decimal(0), "amounts": [],
+            "org_count": 0, "org_amount": Decimal(0), "org_amounts": [],
+            "individual_count": 0, "individual_amount": Decimal(0)}
+
+
+def category_summary(v):
+    """What a profile stores per category; org_* is what organization-facing matching uses."""
+    return {
+        "count": v["count"],
+        "total_amount": float(v["total_amount"]),
+        # median = typical grant size (one outlier grant can't skew it)
+        "median_amount": float(median(v["amounts"])) if v["amounts"] else 0.0,
+        "org_count": v["org_count"],
+        "org_amount": float(v["org_amount"]),
+        "org_median_amount": float(median(v["org_amounts"])) if v["org_amounts"] else 0.0,
+        "individual_count": v["individual_count"],
+        "individual_amount": float(v["individual_amount"]),
+    }
 
 
 def latest_filing_ids():
@@ -32,13 +54,13 @@ class Command(BaseCommand):
     def handle(self, *args, **opts):
         use_filings = latest_filing_ids()
         stats = defaultdict(lambda: {
-            "cats": defaultdict(lambda: {"count": 0, "total_amount": Decimal(0)}),
+            "cats": defaultdict(new_category),
             "total": 0, "amount": Decimal(0), "mi": 0, "years": set(),
         })
         skipped_amended = 0
         grants = PastGrant.objects.values_list(
-            "funder_id", "filing_id", "priority_area", "amount", "recipient_state", "tax_year")
-        for funder_id, filing_id, area, amount, state, year in grants.iterator(chunk_size=10000):
+            "funder_id", "filing_id", "priority_area", "amount", "recipient_state", "tax_year", "recipient_name")
+        for funder_id, filing_id, area, amount, state, year, recipient in grants.iterator(chunk_size=10000):
             if filing_id not in use_filings:
                 skipped_amended += 1
                 continue
@@ -48,7 +70,15 @@ class Command(BaseCommand):
             cat["count"] += 1
             cat["total_amount"] += amount
             if amount > 0:
-                cat.setdefault("amounts", []).append(amount)
+                cat["amounts"].append(amount)
+            if recipient == INDIVIDUAL:
+                cat["individual_count"] += 1
+                cat["individual_amount"] += amount
+            else:
+                cat["org_count"] += 1
+                cat["org_amount"] += amount
+                if amount > 0:
+                    cat["org_amounts"].append(amount)
             s["total"] += 1
             s["amount"] += amount
             s["mi"] += state == "MI"
@@ -61,9 +91,7 @@ class Command(BaseCommand):
                      if c not in NOT_A_FOCUS and v["total_amount"] > 0]
             profiles.append(FunderProfile(
                 funder_id=funder_id,
-                # median_amount = typical grant size in the category (one outlier grant can't skew it)
-                category_breakdown={c: {"count": v["count"], "total_amount": float(v["total_amount"]),
-                                        "median_amount": float(median(v["amounts"])) if v.get("amounts") else 0.0}
+                category_breakdown={c: category_summary(v)
                                     for c, v in sorted(s["cats"].items(), key=lambda kv: -kv[1]["total_amount"])},
                 top_categories=[c for c, _ in sorted(focus, key=lambda x: -x[1])[:3]],
                 total_grants=s["total"],
@@ -81,6 +109,12 @@ class Command(BaseCommand):
         self.stdout.write(self.style.SUCCESS(
             f"Created {len(profiles)} funder profiles "
             f"({skipped_amended} grants from superseded amended filings not counted)"))
+        combos = [(p, c, v) for p in profiles for c, v in p.category_breakdown.items() if c not in NOT_A_FOCUS]
+        only_individual = [(p, c) for p, c, v in combos if v["org_count"] == 0 and v["individual_count"] > 0]
+        self.stdout.write(
+            f"Funder-category combinations (excluding Other/Unclear): {len(combos)} | "
+            f"100% individual giving: {len(only_individual)} | "
+            f"mixed: {sum(1 for _, _, v in combos if v['org_count'] and v['individual_count'])}")
         self.stdout.write("Sample of 10:")
         for p in FunderProfile.objects.select_related("funder").order_by("?")[:10]:
             self.stdout.write(

@@ -1011,7 +1011,9 @@
   }
 
   function renderFunderCard(funder, index, area) {
-    const score = Number(funder.score || 0).toFixed(2);
+    // Shown capped at 1.00; the raw score (which the contact boost can lift above 1)
+    // still orders the cards and picks the badge colour.
+    const score = Math.min(1, Number(funder.score || 0)).toFixed(2);
     const tier = funderTier(funder.score);
     const categories = (funder.top_categories || [])
       .map(

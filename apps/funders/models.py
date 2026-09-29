@@ -31,7 +31,9 @@ class PastGrant(models.Model):
 class FunderProfile(models.Model):
     """What a funder gives to, summarized from its classified PastGrants."""
     funder = models.OneToOneField(Funder, on_delete=models.CASCADE, related_name="profile")
-    category_breakdown = models.JSONField(default=dict)  # {category: {"count": n, "total_amount": n}}
+    # {category: {count, total_amount, median_amount, org_count, org_amount,
+    #             org_median_amount, individual_count, individual_amount}}
+    category_breakdown = models.JSONField(default=dict)
     top_categories = models.JSONField(default=list)      # top 3 by total amount, excluding Unclear / Other
     total_grants = models.IntegerField(default=0)
     total_amount = models.DecimalField(max_digits=16, decimal_places=2, default=0)

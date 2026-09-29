@@ -181,8 +181,8 @@
     <section class="match-board" aria-label="Saved foundations" data-reorder-kind="foundations">
       {% for foundation in saved_foundations %}
         <article class="match-card funder-card" style="--i: {{ forloop.counter0 }}" data-saved-id="{{ foundation.id }}">
-          <div class="score-badge" title="Match score" aria-label="Match score {{ foundation.score|floatformat:2 }}">
-            {% if foundation.score is not None %}{{ foundation.score|floatformat:2 }}{% else %}—{% endif %}
+          <div class="score-badge" title="Match score" aria-label="Match score {{ foundation.display_score|floatformat:2 }}">
+            {% if foundation.display_score is not None %}{{ foundation.display_score|floatformat:2 }}{% else %}—{% endif %}
           </div>
 
           <div class="match-content">

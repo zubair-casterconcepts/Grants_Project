@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 # Agriculture, ...) have no foundation data: those grants were labeled "Other".
 APP_AREA_TO_LABEL = {"Food Access": "Food Access/Food Rescue"}
 SEARCH_LIMIT = 6  # foundations shown under a chat search
+INDIVIDUAL = "(individual)"  # recipient_name of grants paid to a person; no use to an organization applicant
 
 W_SHARE, W_SIZE = 0.65, 0.35   # fit to the category / to the budget (size dropped when no budget)
 FULL_CONFIDENCE_GRANTS = 10     # a share is fully trusted from this many grants in the category
@@ -48,9 +49,23 @@ def contact_for(funder):
             "tax_period": contact.filing.tax_period if contact.filing else ""}
 
 
+def org_stats(cat):
+    """Organization-only numbers of one category_breakdown entry (grants to individuals left out)."""
+    count = cat.get("org_count", cat.get("count", 0))
+    amount = cat.get("org_amount", cat.get("total_amount", 0))
+    typical = cat.get("org_median_amount", cat.get("median_amount", 0)) or (amount / count if count else 0)
+    return count, amount, typical
+
+
+def org_total(profile):
+    """All of a funder's giving to organizations, across categories."""
+    return sum(org_stats(cat)[1] for cat in profile.category_breakdown.values())
+
+
 def example_grants(funder, priority_area, n=3):
     rows, seen = [], set()
     qs = (PastGrant.objects.filter(funder=funder, priority_area=priority_area, amount__gt=0)
+          .exclude(recipient_name=INDIVIDUAL)  # a redacted name is no use as an example
           .order_by("-tax_year", "-amount").values("recipient_name", "recipient_city", "recipient_state",
                                                    "amount", "purpose", "tax_year"))
     for g in qs[:20]:
@@ -65,12 +80,15 @@ def example_grants(funder, priority_area, n=3):
 
 def match_funders(priority_area, budget=None, state=None, limit=20):
     """
-    Funders ranked for a project in `priority_area`.
+    Funders ranked for a project in `priority_area`, for an ORGANIZATION applicant:
+    only grants to organizations count (scholarships and other grants paid to
+    individuals are left out), and a funder with no organization grants in the
+    area is not a match at all.
 
     score = confidence x (0.65 * share + 0.35 * size fit) / weights used
-      share      - part of the funder's giving that went to this area
-      confidence - min(grants in this area, 10) / 10, so one lucky grant can't win
-      size fit   - how close its median grant in this area is to `budget` (if given)
+      share      - part of the funder's organization giving that went to this area
+      confidence - min(organization grants in this area, 10) / 10, so one lucky grant can't win
+      size fit   - how close its median organization grant in this area is to `budget` (if given)
     For a Michigan search (state="MI") the score is then scaled by Michigan
     giving: x (0.25 + 0.75 * share of grants to MI). Without a state it is neutral.
     Funders whose latest filing accepts requests get +0.10. Nobody is filtered out.
@@ -81,11 +99,11 @@ def match_funders(priority_area, budget=None, state=None, limit=20):
     scored = []
     for p in FunderProfile.objects.filter(category_breakdown__has_key=priority_area).select_related("funder"):
         cat = p.category_breakdown[priority_area]
-        amount, count = cat["total_amount"], cat["count"]
-        if amount <= 0 or count <= 0 or p.total_amount <= 0:
-            continue
-        typical = cat.get("median_amount") or amount / count
-        share = min(1.0, amount / float(p.total_amount))
+        count, amount, typical = org_stats(cat)
+        total_org = org_total(p)
+        if amount <= 0 or count <= 0 or total_org <= 0:
+            continue  # only individuals (or nothing real) in this area: not a match for an organization
+        share = min(1.0, amount / total_org)
         confidence = min(count, FULL_CONFIDENCE_GRANTS) / FULL_CONFIDENCE_GRANTS
         fit = size_fit(typical, budget)
         # Confidence scales both parts: one grant says little about either the
@@ -104,12 +122,13 @@ def match_funders(priority_area, budget=None, state=None, limit=20):
         results.append({
             "funder": p.funder.name,
             "ein": p.funder.ein,
-            "score": round(score, 3),
+            "score": round(score, 3),  # raw ranking score (can exceed 1 with the contact boost); cards show min(score, 1)
             "score_parts": {k: round(v, 2) for k, v in parts.items()},
             "top_categories": p.top_categories,
-            "grants_in_category": count,
+            "grants_in_category": count,  # organization grants only
             "amount_in_category": amount,
-            "typical_grant_in_category": round(typical),  # median
+            "typical_grant_in_category": round(typical),  # median organization grant
+            "individual_grants_in_category": int(p.category_breakdown[priority_area].get("individual_count", 0)),
             "michigan_grants_pct": p.michigan_grants_pct,
             "accepts_requests": accepts,  # True / False (pre-selected only) / None (no contact listed)
             "contact": contact_for(p.funder) if accepts is not None else None,
@@ -125,14 +144,13 @@ def foundation_snapshot(funder, priority_area):
     latest = (FunderContact.objects.filter(funder=funder)
               .order_by("-filing__tax_period", "-id").only("accepts_unsolicited").first())
     accepts = latest.accepts_unsolicited if latest else None
-    count = int(cat.get("count") or 0)
-    amount = float(cat.get("total_amount") or 0)
+    count, amount, typical = org_stats(cat) if cat else (0, 0, 0)  # organization grants only, as on the card
     return {
         "name": funder.name,
         "top_categories": profile.top_categories if profile else [],
-        "grants_in_category": count,
-        "amount_in_category": amount,
-        "typical_grant": float(cat.get("median_amount") or (amount / count if count else 0)),
+        "grants_in_category": int(count),
+        "amount_in_category": float(amount),
+        "typical_grant": float(typical),
         "michigan_grants_pct": profile.michigan_grants_pct if profile else 0,
         "accepts_requests": accepts,
         "contact": contact_for(funder) if accepts is not None else None,

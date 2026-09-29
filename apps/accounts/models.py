@@ -192,6 +192,11 @@ class SavedFoundation(models.Model):
     def __str__(self) -> str:
         return f"{self.name[:60]} ({self.ein})"
 
+    @property
+    def display_score(self):
+        """Score as shown on the card: capped at 1.00 (the stored ranking score can exceed 1)."""
+        return None if self.score is None else min(float(self.score), 1.0)
+
 
 class WeeklyDigestLog(models.Model):
     """
