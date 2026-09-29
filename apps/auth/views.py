@@ -17,8 +17,8 @@ from apps.accounts.chat_services import (
     upsert_project_for_conversation,
 )
 from apps.accounts.forms import ProfileAccountForm, ProfileIntakeForm, STATE_CHOICES
-from apps.accounts.models import Conversation, GrantFeedback, Profile, SavedGrant
-from apps.accounts.services import feedback_signals, get_or_create_profile
+from apps.accounts.models import Conversation, GrantFeedback, Profile, SavedFoundation, SavedGrant
+from apps.accounts.services import feedback_signals, get_or_create_profile, saved_total
 from apps.funders.matching import funders_for_search
 from services.grant_agent import iter_grant_matching_events, run_grant_matching_agent
 from services.location_utils import normalize_location
@@ -55,7 +55,18 @@ def _prepare_matches(user, matches):
         row["save_external_id"] = external_id
         row["user_feedback"] = verdicts.get(key, "")
         prepared.append(row)
-    return prepared, len(saved_keys)
+    return prepared, saved_total(user)
+
+
+def _mark_saved_funders(user, data):
+    """Flag foundation cards the user already saved, so they render "Saved"."""
+    funders = (data or {}).get("funders") if isinstance(data, dict) else None
+    if not funders:
+        return data
+    saved_eins = set(SavedFoundation.objects.filter(user=user).values_list("ein", flat=True))
+    for funder in funders:
+        funder["is_saved"] = str(funder.get("ein") or "") in saved_eins
+    return data
 
 
 # Used when the grant_starter_prompt table is empty (or unavailable) so the
@@ -213,7 +224,7 @@ def logout_view(request):
 def home_view(request):
     """ChatGPT-style chat shell with conversation sidebar."""
     profile = get_or_create_profile(request.user)
-    saved_count = SavedGrant.objects.filter(user=request.user).count()
+    saved_count = saved_total(request.user)
     # Always land on a draft New chat (no auto-open of last thread).
     # Threads are only created after the first user message.
     conversations = [
@@ -263,7 +274,7 @@ def matches_api_view(request):
                 "matches": prepared,
                 "match_count": len(prepared),
                 "also_matches": also_prepared,
-                "funders": funders_for_search(ctx),
+                "funders": _mark_saved_funders(request.user, funders_for_search(ctx)),
                 "saved_count": saved_count,
                 "location": {
                     "city": ctx.get("location_city") or "",
@@ -276,7 +287,7 @@ def matches_api_view(request):
             {
                 "matches": [],
                 "match_count": 0,
-                "saved_count": SavedGrant.objects.filter(user=request.user).count(),
+                "saved_count": saved_total(request.user),
                 "error": "match_failed",
             },
             status=500,
@@ -322,7 +333,10 @@ def matches_stream_api_view(request):
                     )
                 yield f"data: {json.dumps(payload)}\n\n"
             # After the grants are shown: foundations that funded similar work.
-            funders = funders_for_search(search_context or resolve_search_context(profile, user_query))
+            funders = _mark_saved_funders(
+                request.user,
+                funders_for_search(search_context or resolve_search_context(profile, user_query)),
+            )
             yield f"data: {json.dumps({'type': 'funders', **funders})}\n\n"
         except Exception:
             fail = {
@@ -330,7 +344,7 @@ def matches_stream_api_view(request):
                 "message": "Something went wrong while ranking grants.",
                 "matches": [],
                 "match_count": 0,
-                "saved_count": SavedGrant.objects.filter(user=request.user).count(),
+                "saved_count": saved_total(request.user),
             }
             yield f"data: {json.dumps(fail)}\n\n"
 
@@ -619,6 +633,8 @@ def conversation_detail_api(request, conversation_id: int):
         meta = message.get("metadata") or {}
         if isinstance(meta.get("matches"), list) and meta["matches"]:
             meta["matches"], _ = _prepare_matches(request.user, meta["matches"])
+        if meta.get("section") == "funders":
+            _mark_saved_funders(request.user, meta)
     return JsonResponse(
         {
             "ok": True,

@@ -25,5 +25,11 @@ urlpatterns = [
     ),
     path("saved/add/", views.save_grant_view, name="save_grant"),
     path("saved/<int:saved_id>/remove/", views.unsave_grant_view, name="unsave_grant"),
+    path("saved/foundations/add/", views.save_foundation_view, name="save_foundation"),
+    path(
+        "saved/foundations/<int:saved_id>/remove/",
+        views.unsave_foundation_view,
+        name="unsave_foundation",
+    ),
     path("digest/run/", views.run_weekly_digests_view, name="run_weekly_digests"),
 ]

@@ -2,7 +2,7 @@ from collections import Counter
 
 from django.contrib.auth import get_user_model
 
-from .models import GrantFeedback, Profile
+from .models import GrantFeedback, Profile, SavedFoundation, SavedGrant
 
 User = get_user_model()
 
@@ -14,6 +14,14 @@ NEGATIVE_PATTERN_THRESHOLD = 2
 def get_or_create_profile(user: User) -> Profile:
     profile, _ = Profile.objects.get_or_create(user=user)
     return profile
+
+
+def saved_total(user) -> int:
+    """The "Saved (N)" nav count: saved grants plus saved foundations."""
+    return (
+        SavedGrant.objects.filter(user=user).count()
+        + SavedFoundation.objects.filter(user=user).count()
+    )
 
 
 def feedback_signals(user) -> dict:

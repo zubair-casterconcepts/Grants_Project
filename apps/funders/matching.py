@@ -118,6 +118,28 @@ def match_funders(priority_area, budget=None, state=None, limit=20):
     return results
 
 
+def foundation_snapshot(funder, priority_area):
+    """What a saved foundation card shows, built from the database (not from the browser)."""
+    profile = FunderProfile.objects.filter(funder=funder).first()
+    cat = (profile.category_breakdown.get(priority_area) if profile else None) or {}
+    latest = (FunderContact.objects.filter(funder=funder)
+              .order_by("-filing__tax_period", "-id").only("accepts_unsolicited").first())
+    accepts = latest.accepts_unsolicited if latest else None
+    count = int(cat.get("count") or 0)
+    amount = float(cat.get("total_amount") or 0)
+    return {
+        "name": funder.name,
+        "top_categories": profile.top_categories if profile else [],
+        "grants_in_category": count,
+        "amount_in_category": amount,
+        "typical_grant": float(cat.get("median_amount") or (amount / count if count else 0)),
+        "michigan_grants_pct": profile.michigan_grants_pct if profile else 0,
+        "accepts_requests": accepts,
+        "contact": contact_for(funder) if accepts is not None else None,
+        "example_grants": example_grants(funder, priority_area) if priority_area else [],
+    }
+
+
 def parse_budget(value):
     """"50000", "$50,000" or a range like "5000-100000" (midpoint) -> float, or None."""
     numbers = [float(n.replace(",", "")) for n in re.findall(r"\d[\d,]*(?:\.\d+)?", str(value or ""))]

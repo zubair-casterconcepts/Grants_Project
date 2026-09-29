@@ -894,34 +894,8 @@ body.chat-sidebar-collapsed .chat-sidebar-toggle {
   color: var(--chat-muted);
 }
 
-/* "Foundations that fund similar work": same card layout as the grants. */
-.source-foundation {
-  color: #6b4f2a;
-  border-color: #e6d8c2;
-  background: #faf6ef;
-}
-
-.funder-examples {
-  margin: 0.15rem 0 0;
-  padding-left: 1.05rem;
-  font-size: 0.82rem;
-  line-height: 1.45;
-  color: var(--chat-ink);
-}
-
-.funder-examples li + li {
-  margin-top: 0.1rem;
-}
-
-.funder-example-meta {
-  color: var(--chat-muted);
-}
-
-.funder-how-to {
-  margin-top: 0.3rem;
-  overflow-wrap: anywhere;
-}
-
+/* "Foundations that fund similar work": card styles live in dashboard.css
+   (shared with the Saved page); only the chat's empty state is here. */
 .funder-empty {
   padding: 0.8rem 0.95rem;
   border: 1px dashed var(--chat-line);

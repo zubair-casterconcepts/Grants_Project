@@ -151,6 +151,44 @@ class SavedGrant(models.Model):
             return 0
 
 
+class SavedFoundation(models.Model):
+    """
+    A foundation the user saved from "Foundations that fund similar work".
+    Stored as it looked when saved (like SavedGrant), for the searched area.
+    """
+
+    user = models.ForeignKey(
+        GrantUser,
+        on_delete=models.CASCADE,
+        related_name="saved_foundations",
+    )
+    ein = models.CharField(max_length=9)
+    name = models.CharField(max_length=255)
+    priority_area = models.CharField(max_length=64, blank=True)  # the area it was matched for
+    score = models.FloatField(null=True, blank=True)
+    top_categories = models.JSONField(default=list, blank=True)
+    grants_in_category = models.IntegerField(default=0)
+    amount_in_category = models.FloatField(default=0)
+    typical_grant = models.FloatField(default=0)
+    michigan_grants_pct = models.FloatField(default=0)
+    accepts_requests = models.BooleanField(null=True)  # None = no application contact listed
+    contact = models.JSONField(null=True, blank=True)
+    example_grants = models.JSONField(default=list, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "grant_saved_foundation"
+        ordering = ["-created_at"]
+        verbose_name = "Saved foundation"
+        verbose_name_plural = "Saved foundations"
+        constraints = [
+            models.UniqueConstraint(fields=["user", "ein"], name="uniq_user_saved_foundation"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.name[:60]} ({self.ein})"
+
+
 class WeeklyDigestLog(models.Model):
     """
     One row per user per digest week, so re-running the sender is idempotent and

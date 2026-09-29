@@ -8,8 +8,8 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=Manrope:wght@400;500;600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="{% static 'css/dashboard.css' %}?v=20260916-opengrants">
-  <link rel="stylesheet" href="{% static 'css/chat.css' %}?v=20260929-funders">
+  <link rel="stylesheet" href="{% static 'css/dashboard.css' %}?v=20260929-savefunders">
+  <link rel="stylesheet" href="{% static 'css/chat.css' %}?v=20260929-savefunders">
 </head>
 <body class="dashboard-page chat-page">
   <div class="chat-layout">
@@ -102,6 +102,7 @@
         data-profile-url="{% url 'auth:chat_profile' %}"
         data-conversations-url="{% url 'auth:conversations' %}"
         data-save-url="{% url 'accounts:save_grant' %}"
+        data-save-foundation-url="{% url 'accounts:save_foundation' %}"
         data-feedback-url="{% url 'auth:grant_feedback' %}"
         data-home-url="{% url 'auth:home' %}"
         data-csrf-token="{{ csrf_token }}"
@@ -209,6 +210,6 @@
   {{ conversations_bootstrap|json_script:"conversations-bootstrap" }}
   {% include "partials/page_loader.html" %}
   <script src="{% static 'js/profile-menu.js' %}" defer></script>
-  <script src="{% static 'js/chat.js' %}?v=20260929-funders" defer></script>
+  <script src="{% static 'js/chat.js' %}?v=20260929-savefunders" defer></script>
 </body>
 </html>

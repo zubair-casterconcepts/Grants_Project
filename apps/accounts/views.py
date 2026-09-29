@@ -25,9 +25,9 @@ from .forms import (
     ProfileIntakeForm,
     StarterPromptForm,
 )
-from .models import SavedGrant, StarterPrompt
+from .models import SavedFoundation, SavedGrant, StarterPrompt
 from .chat_services import sync_profile_to_user_projects
-from .services import get_or_create_profile
+from .services import get_or_create_profile, saved_total
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +67,7 @@ def settings_view(request):
         {
             "form": form,
             "profile": profile,
-            "saved_count": SavedGrant.objects.filter(user=request.user).count(),
+            "saved_count": saved_total(request.user),
         },
     )
 
@@ -97,7 +97,7 @@ def profile_settings_view(request):
             "profile": profile,
             "account_form": account_form,
             "password_form": password_form,
-            "saved_count": SavedGrant.objects.filter(user=request.user).count(),
+            "saved_count": saved_total(request.user),
         },
     )
 
@@ -126,7 +126,7 @@ def change_password_view(request):
             "profile": profile,
             "account_form": account_form,
             "password_form": password_form,
-            "saved_count": SavedGrant.objects.filter(user=request.user).count(),
+            "saved_count": saved_total(request.user),
         },
         status=400,
     )
@@ -149,7 +149,7 @@ def _starter_prompt_context(request, *, create_form=None, error_pk=None, error_f
         "rows": rows,
         "create_form": create_form or StarterPromptForm(),
         "open_create": create_form is not None,
-        "saved_count": SavedGrant.objects.filter(user=request.user).count(),
+        "saved_count": saved_total(request.user),
     }
 
 
@@ -222,6 +222,7 @@ def saved_grants_view(request):
         return redirect("auth:home")
 
     saved = SavedGrant.objects.filter(user=request.user)
+    foundations = SavedFoundation.objects.filter(user=request.user)
     return render(
         request,
         "accounts/saved_grants.html",
@@ -229,6 +230,8 @@ def saved_grants_view(request):
             "profile": profile,
             "saved_grants": saved,
             "saved_count": saved.count(),
+            "saved_foundations": foundations,
+            "saved_foundations_count": foundations.count(),
         },
     )
 
@@ -325,7 +328,7 @@ def feedback_reasons_view(request):
             "scope_mine_url": link(all_users=False),
             "prev_url": link(page_number=page.previous_page_number()) if page.has_previous() else "",
             "next_url": link(page_number=page.next_page_number()) if page.has_next() else "",
-            "saved_count": SavedGrant.objects.filter(user=request.user).count(),
+            "saved_count": saved_total(request.user),
         },
     )
 
@@ -471,7 +474,7 @@ def save_grant_view(request):
             {
                 "ok": True,
                 "created": created,
-                "saved_count": SavedGrant.objects.filter(user=request.user).count(),
+                "saved_count": saved_total(request.user),
             }
         )
     if created:
@@ -487,6 +490,49 @@ def unsave_grant_view(request, saved_id: int):
     grant = get_object_or_404(SavedGrant, pk=saved_id, user=request.user)
     grant.delete()
     messages.success(request, "Removed from saved grants.")
+    return redirect(request.POST.get("next") or "accounts:saved_grants")
+
+
+@login_required
+@require_POST
+def save_foundation_view(request):
+    """Save a foundation from "Foundations that fund similar work" (same flow as save_grant_view)."""
+    from apps.funders.matching import foundation_snapshot
+    from apps.funders.models import Funder
+
+    wants_json = _wants_json(request)
+    ein = "".join(ch for ch in (request.POST.get("ein") or "") if ch.isdigit())[:9]
+    priority_area = (request.POST.get("priority_area") or "").strip()[:64]
+    funder = Funder.objects.filter(ein=ein).first() if ein else None
+    if funder is None:
+        if wants_json:
+            return JsonResponse({"ok": False, "error": "unknown_foundation"}, status=400)
+        messages.error(request, "Could not save: unknown foundation.")
+        return redirect("auth:home")
+
+    try:
+        score = float(request.POST.get("score") or "")
+    except ValueError:
+        score = None
+
+    _, created = SavedFoundation.objects.update_or_create(
+        user=request.user,
+        ein=ein,
+        defaults={"priority_area": priority_area, "score": score,
+                  **foundation_snapshot(funder, priority_area)},
+    )
+    if wants_json:
+        return JsonResponse({"ok": True, "created": created, "saved_count": saved_total(request.user)})
+    messages.success(request, "Foundation saved." if created else "Foundation already in your saved list (updated).")
+    return redirect(request.POST.get("next") or "auth:home")
+
+
+@login_required
+@require_POST
+def unsave_foundation_view(request, saved_id: int):
+    foundation = get_object_or_404(SavedFoundation, pk=saved_id, user=request.user)
+    foundation.delete()
+    messages.success(request, "Removed from saved foundations.")
     return redirect(request.POST.get("next") or "accounts:saved_grants")
 
 

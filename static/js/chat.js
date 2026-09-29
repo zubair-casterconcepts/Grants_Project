@@ -19,6 +19,7 @@
   const conversationsUrl =
     app.dataset.conversationsUrl || "/home/conversations/";
   const saveUrl = app.dataset.saveUrl || "/accounts/saved/add/";
+  const saveFoundationUrl = app.dataset.saveFoundationUrl || "/accounts/saved/foundations/add/";
   const feedbackUrl = app.dataset.feedbackUrl || "/home/feedback/";
   const homeUrl = app.dataset.homeUrl || "/home/";
   const csrfToken =
@@ -896,6 +897,22 @@
     return rows.length ? `<ul class="funder-examples">${rows.join("")}</ul>` : "";
   }
 
+  // Same inline form as a grant's Save button; bindSaveForms() submits it.
+  function renderFunderSaveControls(funder, area) {
+    if (funder.is_saved) return `<span class="saved-pill">Saved</span>`;
+    if (!funder.ein) return "";
+    return `
+      <form class="inline-save-form" method="post" action="${attr(saveFoundationUrl)}" data-no-loader="true">
+        <input type="hidden" name="csrfmiddlewaretoken" value="${attr(csrfToken)}">
+        <input type="hidden" name="next" value="${attr(homeUrl)}">
+        <input type="hidden" name="ein" value="${attr(funder.ein)}">
+        <input type="hidden" name="priority_area" value="${attr(area || "")}">
+        <input type="hidden" name="score" value="${attr(funder.score ?? "")}">
+        <button type="submit" class="btn-save">Save</button>
+      </form>
+    `;
+  }
+
   function renderFunderCard(funder, index, area) {
     const score = Number(funder.score || 0).toFixed(2);
     const tier = funderTier(funder.score);
@@ -937,11 +954,13 @@
             }
             <div class="info-row">${labelWithIcon(icons.pin, "How to reach them")}${funderContactHtml(funder)}</div>
           </div>
-          ${
-            irsUrl
-              ? `<div class="match-footer"><span></span><div class="match-actions"><a class="btn-view" href="${attr(irsUrl)}" target="_blank" rel="noopener noreferrer">IRS filings</a></div></div>`
-              : ""
-          }
+          <div class="match-footer">
+            <span></span>
+            <div class="match-actions">
+              ${irsUrl ? `<a class="btn-view" href="${attr(irsUrl)}" target="_blank" rel="noopener noreferrer">IRS filings</a>` : ""}
+              ${renderFunderSaveControls(funder, area)}
+            </div>
+          </div>
         </div>
       </article>
     `;
@@ -974,7 +993,8 @@
 
   async function showFundersSection(data, { persist = true } = {}) {
     if (!data || typeof data !== "object") return;
-    await appendAssistantHtml(fundersSectionHtml(data), { persist: false });
+    const row = await appendAssistantHtml(fundersSectionHtml(data), { persist: false });
+    if (row) bindSaveForms(row);
     if (!persist) return;
     await persistMessage("assistant", FUNDERS_SECTION_TITLE, {
       type: "funders",
