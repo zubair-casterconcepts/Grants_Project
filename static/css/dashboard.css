@@ -591,6 +591,13 @@ body {
   color: var(--dash-ink);
 }
 
+/* Saved page: when the grant / foundation was saved (card footer, left). */
+.saved-date {
+  font-size: 0.76rem;
+  font-weight: 500;
+  color: var(--dash-muted);
+}
+
 .saved-section-note {
   margin: 0.2rem 0 0;
   font-size: 0.9rem;

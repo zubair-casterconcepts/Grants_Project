@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=Manrope:wght@400;500;600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="{% static 'css/dashboard.css' %}?v=20260929-savefunders">
+  <link rel="stylesheet" href="{% static 'css/dashboard.css' %}?v=20260929-saveddate">
 </head>
 <body class="dashboard-page">
   <main class="dashboard-shell">
@@ -150,6 +150,7 @@
             </div>
 
             <div class="match-footer">
+              <span class="saved-date" title="Saved {{ grant.created_at|date:'M j, Y · H:i' }} UTC">Saved {{ grant.created_at|date:"M j, Y" }}</span>
               <div class="match-actions">
                 {% if grant.url %}
                   <a class="btn-view" href="{{ grant.url }}" target="_blank" rel="noopener noreferrer">View</a>
@@ -289,6 +290,7 @@
             </div>
 
             <div class="match-footer">
+              <span class="saved-date" title="Saved {{ foundation.created_at|date:'M j, Y · H:i' }} UTC">Saved {{ foundation.created_at|date:"M j, Y" }}</span>
               <div class="match-actions">
                 <a class="btn-view" href="https://projects.propublica.org/nonprofits/organizations/{{ foundation.ein }}" target="_blank" rel="noopener noreferrer">IRS filings</a>
                 <form class="inline-save-form" method="post" action="{% url 'accounts:unsave_foundation' foundation.id %}" data-loader-message="Removing foundation…">
