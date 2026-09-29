@@ -1,3 +1,4 @@
+import json
 import logging
 import threading
 
@@ -6,6 +7,7 @@ from django.contrib import messages
 from django.contrib.auth import update_session_auth_hash
 from django.contrib.auth.decorators import login_required
 from django.db import connection
+from django.db.models import F
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils.crypto import constant_time_compare
@@ -221,8 +223,10 @@ def saved_grants_view(request):
     if profile.needs_onboarding:
         return redirect("auth:home")
 
-    saved = SavedGrant.objects.filter(user=request.user)
-    foundations = SavedFoundation.objects.filter(user=request.user)
+    # The order the user dragged the cards into; not-yet-ordered (new) saves on top.
+    order = (F("sort_order").asc(nulls_first=True), "-created_at")
+    saved = SavedGrant.objects.filter(user=request.user).order_by(*order)
+    foundations = SavedFoundation.objects.filter(user=request.user).order_by(*order)
     return render(
         request,
         "accounts/saved_grants.html",
@@ -525,6 +529,33 @@ def save_foundation_view(request):
         return JsonResponse({"ok": True, "created": created, "saved_count": saved_total(request.user)})
     messages.success(request, "Foundation saved." if created else "Foundation already in your saved list (updated).")
     return redirect(request.POST.get("next") or "auth:home")
+
+
+@login_required
+@require_POST
+def saved_reorder_view(request):
+    """Save the drag-and-drop order of one Saved page section (grants or foundations)."""
+    try:
+        payload = json.loads(request.body.decode("utf-8") or "{}")
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return JsonResponse({"ok": False, "error": "invalid_json"}, status=400)
+    model = {"grants": SavedGrant, "foundations": SavedFoundation}.get(payload.get("kind"))
+    ids = payload.get("ids")
+    if model is None or not isinstance(ids, list):
+        return JsonResponse({"ok": False, "error": "invalid_request"}, status=400)
+    try:
+        ids = [int(i) for i in ids][:1000]
+    except (TypeError, ValueError):
+        return JsonResponse({"ok": False, "error": "invalid_ids"}, status=400)
+    rows = {row.id: row for row in model.objects.filter(user=request.user, id__in=ids)}
+    ordered = []
+    for position, row_id in enumerate(ids):
+        row = rows.get(row_id)
+        if row is not None:
+            row.sort_order = position
+            ordered.append(row)
+    model.objects.bulk_update(ordered, ["sort_order"])
+    return JsonResponse({"ok": True, "updated": len(ordered)})
 
 
 @login_required

@@ -26,6 +26,7 @@ urlpatterns = [
     path("saved/add/", views.save_grant_view, name="save_grant"),
     path("saved/<int:saved_id>/remove/", views.unsave_grant_view, name="unsave_grant"),
     path("saved/foundations/add/", views.save_foundation_view, name="save_foundation"),
+    path("saved/reorder/", views.saved_reorder_view, name="saved_reorder"),
     path(
         "saved/foundations/<int:saved_id>/remove/",
         views.unsave_foundation_view,

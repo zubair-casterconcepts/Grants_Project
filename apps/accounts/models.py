@@ -124,6 +124,8 @@ class SavedGrant(models.Model):
     score = models.FloatField(null=True, blank=True)
     reason = models.TextField(blank=True)
     description = models.TextField(blank=True)
+    # Position the user dragged it to on the Saved page (None = not reordered yet).
+    sort_order = models.IntegerField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -174,6 +176,8 @@ class SavedFoundation(models.Model):
     accepts_requests = models.BooleanField(null=True)  # None = no application contact listed
     contact = models.JSONField(null=True, blank=True)
     example_grants = models.JSONField(default=list, blank=True)
+    # Position the user dragged it to on the Saved page (None = not reordered yet).
+    sort_order = models.IntegerField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
