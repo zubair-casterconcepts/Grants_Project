@@ -496,6 +496,81 @@
     }
   }
 
+  // "Sep 28, 2026" — the day the chat was started.
+  function formatChatDate(iso) {
+    const date = iso ? new Date(iso) : null;
+    if (!date || Number.isNaN(date.getTime())) return "";
+    return date.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+  }
+
+  async function renameConversation(id, title) {
+    const response = await fetch(`${conversationsUrl}${id}/`, {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        "X-CSRFToken": csrfToken,
+        "X-Requested-With": "XMLHttpRequest",
+      },
+      credentials: "same-origin",
+      body: JSON.stringify({ title }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data.ok || !data.conversation) throw new Error("rename_failed");
+    return data.conversation;
+  }
+
+  // Edit the chat name in place: Enter or clicking away saves, Escape cancels.
+  function startRenameConversation(row, wrap, itemBtn) {
+    closeAllConversationMenus();
+    const current = row.title || "New chat";
+    const input = document.createElement("input");
+    input.type = "text";
+    input.className = "chat-conversation-rename";
+    input.value = current;
+    input.maxLength = 120;
+    input.setAttribute("aria-label", "Chat name");
+    itemBtn.replaceWith(input);
+    wrap.classList.add("is-renaming");
+    input.focus();
+    input.select();
+
+    let finished = false;
+    const finish = async (save) => {
+      if (finished) return;
+      finished = true;
+      const title = input.value.replace(/\s+/g, " ").trim();
+      if (!save || !title || title === current) {
+        renderConversationList();
+        return;
+      }
+      input.disabled = true;
+      try {
+        const updated = await renameConversation(row.id, title);
+        // Update in place so renaming doesn't reorder the list.
+        conversations = conversations.map((item) =>
+          isSameConversation(item.id, updated.id) ? { ...item, ...updated, id: item.id } : item
+        );
+        if (isSameConversation(updated.id, conversationId)) setActiveTitle(updated.title);
+      } catch (_) {
+        /* keep the old name */
+      }
+      renderConversationList();
+    };
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        finish(true);
+      } else if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        finish(false);
+      }
+    });
+    input.addEventListener("blur", () => finish(true));
+    input.addEventListener("click", (event) => event.stopPropagation());
+  }
+
   function renderConversationList() {
     if (!listEl) return;
     listEl.innerHTML = "";
@@ -515,8 +590,18 @@
       const btn = document.createElement("button");
       btn.type = "button";
       btn.className = "chat-conversation-item";
-      btn.textContent = row.title || "New chat";
-      btn.title = row.title || "New chat";
+      const titleSpan = document.createElement("span");
+      titleSpan.className = "chat-conversation-title";
+      titleSpan.textContent = row.title || "New chat";
+      btn.appendChild(titleSpan);
+      const started = formatChatDate(row.created_at);
+      if (started) {
+        const dateSpan = document.createElement("span");
+        dateSpan.className = "chat-conversation-date";
+        dateSpan.textContent = started;
+        btn.appendChild(dateSpan);
+      }
+      btn.title = started ? `${row.title || "New chat"} · started ${started}` : row.title || "New chat";
       btn.addEventListener("click", () => {
         // Same thread (number/string id safe) or busy matching — do not reload.
         if (isSameConversation(rowId, conversationId) || busy || keepBusy) return;
@@ -546,6 +631,17 @@
       dropdown.className = "chat-conversation-dropdown";
       dropdown.setAttribute("role", "menu");
 
+      const editBtn = document.createElement("button");
+      editBtn.type = "button";
+      editBtn.className = "chat-conversation-edit";
+      editBtn.setAttribute("role", "menuitem");
+      editBtn.textContent = "Edit";
+      editBtn.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        startRenameConversation(row, wrap, btn);
+      });
+
       const deleteBtn = document.createElement("button");
       deleteBtn.type = "button";
       deleteBtn.className = "chat-conversation-delete";
@@ -569,6 +665,7 @@
         }
       });
 
+      dropdown.appendChild(editBtn);
       dropdown.appendChild(deleteBtn);
       menuWrap.appendChild(moreBtn);
       menuWrap.appendChild(dropdown);

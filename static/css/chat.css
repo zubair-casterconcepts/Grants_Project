@@ -206,10 +206,40 @@ body.chat-sidebar-collapsed .chat-sidebar {
   text-align: left;
   cursor: pointer;
   line-height: 1.35;
+  display: block;
+  min-width: 0;
+}
+
+.chat-conversation-title {
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
+}
+
+/* The day the chat was started, under its name. */
+.chat-conversation-date {
+  display: block;
+  margin-top: 0.12rem;
+  font-size: 0.74rem;
+  font-weight: 500;
+  line-height: 1.2;
+  color: var(--chat-muted);
+}
+
+.chat-conversation-rename {
+  width: 100%;
+  min-width: 0;
+  margin: 0.35rem 0.1rem 0.35rem 0.45rem;
+  padding: 0.45rem 0.55rem;
+  border: 1px solid var(--chat-green);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--chat-ink);
+  font: inherit;
+  font-size: 0.9rem;
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(45, 80, 70, 0.12);
 }
 
 .chat-conversation-row.is-active .chat-conversation-item {
@@ -271,6 +301,24 @@ body.chat-sidebar-collapsed .chat-sidebar {
 
 .chat-conversation-dropdown.is-open {
   display: grid;
+}
+
+.chat-conversation-edit {
+  width: 100%;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--chat-ink);
+  font: inherit;
+  font-size: 0.88rem;
+  font-weight: 600;
+  text-align: left;
+  padding: 0.55rem 0.65rem;
+  cursor: pointer;
+}
+
+.chat-conversation-edit:hover {
+  background: rgba(45, 80, 70, 0.08);
 }
 
 .chat-conversation-delete {

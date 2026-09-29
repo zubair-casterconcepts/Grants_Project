@@ -227,6 +227,8 @@ def generate_chat_title(user_query: str) -> str:
 
 
 def _should_retitle(conversation: Conversation, first_user_text: str) -> bool:
+    if conversation.title_locked:  # the user named this chat
+        return False
     current = (conversation.title or "").strip()
     if current in ("", "New chat", "New Chat"):
         return True
@@ -272,7 +274,8 @@ def add_message(
         def _upgrade_title() -> None:
             try:
                 title = generate_chat_title(query_text)
-                Conversation.objects.filter(pk=conversation_id).update(title=title[:60])
+                # Skip if the user renamed the chat while the AI title was running.
+                Conversation.objects.filter(pk=conversation_id, title_locked=False).update(title=title[:60])
             except Exception:
                 logger.exception("Background chat title upgrade failed")
 

@@ -480,6 +480,8 @@ class Conversation(models.Model):
         related_name="conversations",
     )
     title = models.CharField(max_length=255, default="New chat")
+    # True once the user renamed the chat: automatic titles never replace it.
+    title_locked = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

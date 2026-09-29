@@ -595,10 +595,24 @@ def conversations_api_view(request):
 
 
 @login_required
-@require_http_methods(["GET", "DELETE"])
+@require_http_methods(["GET", "PATCH", "DELETE"])
 def conversation_detail_api(request, conversation_id: int):
-    """Load one conversation, or delete it (and its messages)."""
+    """Load one conversation, rename it, or delete it (and its messages)."""
     conversation = _user_conversation(request.user, conversation_id)
+
+    if request.method == "PATCH":
+        try:
+            payload = json.loads(request.body.decode("utf-8") or "{}")
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return JsonResponse({"ok": False, "error": "invalid_json"}, status=400)
+        title = " ".join(str(payload.get("title") or "").split())[:120]
+        if not title:
+            return JsonResponse({"ok": False, "error": "empty_title"}, status=400)
+        conversation.title = title
+        conversation.title_locked = True
+        # update() keeps updated_at, so renaming doesn't move the chat to the top.
+        Conversation.objects.filter(pk=conversation.pk).update(title=title, title_locked=True)
+        return JsonResponse({"ok": True, "conversation": conversation_to_dict(conversation)})
 
     if request.method == "DELETE":
         deleted_id = conversation.id
