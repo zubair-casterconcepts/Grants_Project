@@ -605,6 +605,8 @@ def conversation_detail_api(request, conversation_id: int):
             payload = json.loads(request.body.decode("utf-8") or "{}")
         except (UnicodeDecodeError, json.JSONDecodeError):
             return JsonResponse({"ok": False, "error": "invalid_json"}, status=400)
+        if not isinstance(payload, dict):
+            return JsonResponse({"ok": False, "error": "invalid_json"}, status=400)
         title = " ".join(str(payload.get("title") or "").split())[:120]
         if not title:
             return JsonResponse({"ok": False, "error": "empty_title"}, status=400)

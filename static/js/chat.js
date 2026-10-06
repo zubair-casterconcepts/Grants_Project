@@ -2696,6 +2696,68 @@
     ) || /^update my project$/i.test(text);
   }
 
+  // A question about the priority areas themselves ("what are the priority area
+  // options?", "how would things change if I switched my priority area?") is
+  // answered directly, without a search. Deliberately narrow: a message that
+  // names an area or an amount ("find Youth Development grants for $10k"), or
+  // asks for grants/foundations in the user's area, stays a search, as before.
+  function priorityAreaChoices() {
+    return (bootstrap.choices && bootstrap.choices.priority_area) || [];
+  }
+
+  function namesPriorityArea(t) {
+    return priorityAreaChoices().some((c) => {
+      const label = String(c.label || c.value).toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      return label && new RegExp(`\\b${label}\\b`).test(t); // whole words: "agriculture" is not "Culture"
+    });
+  }
+
+  function isPriorityAreaQuestion(text) {
+    const t = String(text || "").toLowerCase().replace(/[’‘]/g, "'");
+    // "priority area(s)", common typos ("priorty", "aera"), or "focus area(s)".
+    if (!/\b(prio\w*|focus)\s+(areas?|aeras?)\b/.test(t)) return false;
+    if (namesPriorityArea(t)) return false;
+    if (/\$|\b\d[\d,.]*\s*(k|m|thousand|million)\b|\b\d{1,3}(,\d{3})+\b|\b\d{4,}\b/.test(t)) return false;
+    const question = /\?\s*$/.test(t) ||
+      /^(please\s+)?(how|what|what's|which|why|is|are|can|could|would|will|do|does|should|may|tell|show|list|give|remind|explain)\b/.test(t) ||
+      /\b(kya|kaise|kaun|konsa|konse)\b/.test(t);
+    const switching = /\b(switch\w*|chang\w*|swap\w*|pick\w*|choos\w*|chose|select\w*|different|another)\b/.test(t);
+    // "How would switching my priority area change which grants I see?" / "Change my priority area"
+    if (switching && (question || /^(please\s+)?(i\s+want\s+to\s+|i'd\s+like\s+to\s+|let\s+me\s+)?(change|switch|swap|pick|choose|select)\b/.test(t))) return true;
+    // Otherwise grants/foundations, or "... for/in my priority area", means a search.
+    if (/\b(grants?|fund(s|ed|ing)?|foundations?|funders?|money|search\w*|find\w*)\b/.test(t)) return false;
+    if (/\b(for|in|under|within|match\w*|fit\w*)\s+(my|our|this|that)\s+(prio\w*|focus)\s/.test(t)) return false;
+    return question || /\b(options?|choices?|list|available|remind)\b/.test(t);
+  }
+
+  // Which way a message from an onboarded user goes: the project-update flow,
+  // a direct priority-area answer, or (everything else) a grant search.
+  function readyMessageRoute(text) {
+    const areaQuestion = isPriorityAreaQuestion(text);
+    // "What would change if I changed the priority area in my project?" is a
+    // question, not a request to update the project.
+    const hypothetical = /\b(would|what if|what happens|happen\w*)\b/i.test(text);
+    if (wantsUpdateProject(text) && !(areaQuestion && hypothetical)) return "intake";
+    return areaQuestion ? "areas" : "search";
+  }
+
+  function priorityAreaAnswer() {
+    const labels = priorityAreaChoices().map((c) => c.label || c.value);
+    const list = labels.length > 1
+      ? `${labels.slice(0, -1).join(", ")} and ${labels[labels.length - 1]}`
+      : labels.join("");
+    const current = (bootstrap.profile && bootstrap.profile.priority_area) || "";
+    const example = labels.includes("Youth Development") ? "Youth Development" : labels[0] || "Education";
+    return (
+      `These are the priority areas you can choose from:\n${list}.\n\n` +
+      "Switching your priority area changes which grants I search for and which foundations I show " +
+      "under “Foundations that fund similar work” — both are matched to the area you pick." +
+      (current ? ` Your saved project currently uses ${current}.` : "") +
+      `\n\nTell me one area to try, for example “Find ${example} grants”, and I’ll search with it. ` +
+      "That doesn’t change your saved project; to change it, say “Update my project”."
+    );
+  }
+
   // Starter card "Update my project" — open intake directly, independent of the
   // card's (customizable) label text.
   async function startProjectUpdate(displayText) {
@@ -2733,12 +2795,19 @@
     await appendText("user", text);
     clearSuggestions();
 
-    if (wantsUpdateProject(text)) {
+    const route = readyMessageRoute(text);
+    if (route === "intake") {
       await appendText(
         "assistant",
         "Sure — let's refresh your project details. You can also edit everything later in Settings."
       );
       askStep(INTAKE_STEPS[0]);
+      return;
+    }
+
+    // A question about the priority areas: answer from the app's own list, no search.
+    if (route === "areas") {
+      await appendText("assistant", priorityAreaAnswer());
       return;
     }
 
