@@ -86,10 +86,11 @@ class PatchRejected(ValueError):
 
 
 def _min_reasons() -> int:
+    # Even one feedback reason in the week is processed.
     try:
-        return max(1, int(os.getenv("GRANT_INSTRUCTION_MIN_REASONS", "3")))
+        return max(1, int(os.getenv("GRANT_INSTRUCTION_MIN_REASONS", "1")))
     except ValueError:
-        return 3
+        return 1
 
 
 def _min_similarity() -> float:
@@ -470,6 +471,10 @@ def update_agent_instructions(
         return report
 
     minimum = _min_reasons()
+    if not feedback:
+        return _skip(
+            f"No feedback reasons in the last {days} day(s). Current instructions kept."
+        )
     if len(feedback) < minimum:
         return _skip(
             f"Only {len(feedback)} feedback reason(s) in the last {days} day(s); "
